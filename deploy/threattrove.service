@@ -1,0 +1,43 @@
+[Unit]
+Description=threattrove — reputation lookup for hashes, URLs and domains
+Documentation=https://threattrove.com
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=threattrove
+Group=threattrove
+WorkingDirectory=/opt/threattrove
+EnvironmentFile=-/etc/threattrove/threattrove.env
+Environment=TT_BIND=127.0.0.1:8080
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/threattrove/.venv/bin/gunicorn \
+    --config /opt/threattrove/deploy/gunicorn.conf.py \
+    threattrove.web:app
+ExecReload=/bin/kill -s HUP $MAINPID
+KillMode=mixed
+TimeoutStopSec=35
+Restart=on-failure
+RestartSec=3
+
+# --- hardening -----------------------------------------------------------
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+SystemCallArchitectures=native
+ReadWritePaths=/var/lib/threattrove
+StateDirectory=threattrove
+StateDirectoryMode=0750
+
+[Install]
+WantedBy=multi-user.target

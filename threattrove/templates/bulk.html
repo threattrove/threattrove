@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+
+{% block title %}Bulk lookup — {{ site_name }}{% endblock %}
+
+{% block content %}
+<h1>Bulk enrichment</h1>
+<p class="lead">
+  Upload a CSV export from a feed, a newline-delimited list of hashes, or a
+  JSON array. Columns are auto-detected, duplicates are dropped, and up to
+  {{ max_rows }} indicators run per job.
+</p>
+
+{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+
+<div class="grid two">
+  <div class="card">
+    <form method="post" enctype="multipart/form-data" id="bulk-form">
+      <label class="field" for="file">File</label>
+      <input type="file" id="file" name="file"
+             accept=".csv,.tsv,.txt,.json,.jsonl,.ndjson,.list,.ioc">
+      <div class="hint">Max 2 MB. CSV headers like <code>sha256</code>,
+        <code>hash</code>, <code>url</code>, <code>domain</code> or
+        <code>indicator</code> are detected automatically.</div>
+
+      <hr class="sep">
+
+      <label class="field" for="indicators">…or paste indicators</label>
+      <textarea id="indicators" name="indicators" spellcheck="false"
+                placeholder="44d88612fea8a8f36de82e1278abb02f&#10;https://example.com/login&#10;example.com&#10;# comments are ignored"></textarea>
+
+      <div class="row" style="margin-top:14px">
+        <div>
+          <label class="field" for="label">Job label <span class="muted">(optional)</span></label>
+          <input type="text" id="label" name="label" maxlength="80"
+                 placeholder="weekly feed — 2026-W44">
+        </div>
+      </div>
+
+      <div class="form-actions">
+        <button type="submit">Queue job</button>
+        <span class="hint" style="margin:0">Runs in the background; safe to close the tab.</span>
+      </div>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Recent jobs</h2>
+    {% if recent %}
+    <table>
+      <thead><tr><th>Job</th><th>Status</th><th>Progress</th><th></th></tr></thead>
+      <tbody>
+      {% for j in recent %}
+        <tr>
+          <td class="mono"><a href="{{ url_for('bulk_result_page', job_id=j.id) }}">{{ j.label or j.id }}</a></td>
+          <td><span class="tag {{ 'clean' if j.status == 'done' else 'unknown' if j.status == 'queued' else 'suspicious' if j.status == 'running' else 'malicious' }}">{{ j.status }}</span></td>
+          <td class="ratio">{{ j.done }}/{{ j.total }}</td>
+          <td class="note">{{ rel_time(j.created) }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="empty">No jobs yet.</div>
+    {% endif %}
+
+    <hr class="sep">
+    <h3>API</h3>
+    <pre class="json">curl -F "file=@feed.csv" {{ request.url_root }}api/v1/bulk</pre>
+  </div>
+</div>
+{% endblock %}

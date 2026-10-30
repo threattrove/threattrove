@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+
+{% block title %}Local verdicts — {{ site_name }}{% endblock %}
+
+{% block content %}
+<h1>Local verdicts</h1>
+<p class="lead">
+  Your own intelligence. A local entry outranks every upstream source, so a
+  known-bad or explicitly-allowed indicator always resolves the way you decided.
+</p>
+
+{% if message %}<div class="alert ok">{{ message }}</div>{% endif %}
+
+<div class="grid two">
+  <div class="card">
+    <h2>Add or remove</h2>
+    <form method="post">
+      <label class="field" for="value">Indicator</label>
+      <input type="text" id="value" name="value" required
+             placeholder="sha256 / md5 / url / domain / ip">
+
+      <div class="row" style="margin-top:14px">
+        <div>
+          <label class="field" for="label">Verdict</label>
+          <select id="label" name="label">
+            <option value="malware">malware → malicious</option>
+            <option value="suspicious">suspicious</option>
+            <option value="clean">clean → known good</option>
+          </select>
+        </div>
+        <div>
+          <label class="field" for="note">Note</label>
+          <input type="text" id="note" name="note" maxlength="200"
+                 placeholder="ticket #1234">
+        </div>
+      </div>
+
+      <div class="form-actions">
+        <button type="submit" name="action" value="add">Store entry</button>
+        <button type="submit" name="action" value="delete" class="btn ghost">Remove</button>
+      </div>
+    </form>
+    <div class="hint">Stored in the local SQLite database only — never shared.</div>
+  </div>
+
+  <div class="card">
+    <h2>Entries ({{ entries|length }})</h2>
+    {% if entries %}
+    <table>
+      <thead><tr><th>Indicator</th><th>Label</th><th>Note</th></tr></thead>
+      <tbody>
+      {% for e in entries %}
+        <tr>
+          <td class="mono wrap-cell">
+            <a href="{{ url_for('result_page', kind=e.kind, v=e.value) }}">{{ e.value }}</a>
+          </td>
+          <td><span class="tag {{ 'malicious' if 'mal' in e.label or 'bad' in e.label else 'clean' if 'clean' in e.label or 'good' in e.label else 'suspicious' }}">{{ e.label }}</span></td>
+          <td class="note">{{ e.note }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="empty">No local entries yet.</div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

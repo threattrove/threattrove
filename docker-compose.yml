@@ -1,0 +1,42 @@
+services:
+  threattrove:
+    build: .
+    image: threattrove:2.0.0
+    container_name: threattrove
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      TT_DB: /data/threattrove.db
+      TT_SITE_URL: https://threattrove.com
+      TT_SITE_NAME: ThreatTrove
+      TT_WORKERS: "2"
+      TT_THREADS: "8"
+      TT_RATE_LIMIT: "60"
+      # source keys — copy deploy/threattrove.env.example to .env
+      VT_API_KEY: ${VT_API_KEY:-}
+      ABUSECH_AUTH_KEY: ${ABUSECH_AUTH_KEY:-}
+      OTX_API_KEY: ${OTX_API_KEY:-}
+      HA_API_KEY: ${HA_API_KEY:-}
+      MALSHARE_API_KEY: ${MALSHARE_API_KEY:-}
+      TRIAGE_API_KEY: ${TRIAGE_API_KEY:-}
+      URLSCAN_API_KEY: ${URLSCAN_API_KEY:-}
+      GSB_API_KEY: ${GSB_API_KEY:-}
+      PHISHTANK_APPKEY: ${PHISHTANK_APPKEY:-}
+      TT_ENABLE_REVERSE_IP: ${TT_ENABLE_REVERSE_IP:-}
+    volumes:
+      - threattrove-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+
+volumes:
+  threattrove-data:

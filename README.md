@@ -1,0 +1,320 @@
+# ThreatTrove
+
+**Self-hosted reputation lookup for file hashes, URLs, domains and IPs — built to run on [threattrove.com](https://threattrove.com) or on your own box.**
+
+ThreatTrove does the three things most people open VirusTotal for: paste an
+indicator, get a verdict, and see *which* sources said what. It runs keyless out
+of the box (8 sources, no account anywhere) and gets sharper as you add API keys.
+
+```
+$ threattrove 44d88612fea8a8f36de82e1278abb02f
+
+━━ 44d88612fea8a8f36de82e1278abb02f
+
+  File hash
+  MALICIOUS    100% confidence    Flagged as malicious by 2 security source(s)
+
+  SECURITY SOURCES
+  ──────────────────────────────────────────────────────────────────────────
+  ● circl            MALICIOUS          listed by malshare.com
+  ● otx              MALICIOUS          50 pulse(s)
+
+  elapsed 1.14s  ·  2 security sources queried
+```
+
+That's the EICAR test file, found by two keyless sources with no API key set.
+
+---
+
+## Why another one
+
+* **Keyless by default.** CIRCL hashlookup, AlienVault OTX, urlscan.io, crt.sh,
+  DNS and RDAP answer without registration, so a fresh clone is useful in ~30s.
+* **One verdict, many voices.** Each source gets its own row with status, note
+  and (where it exists) an engine ratio; the verdict is a transparent score, not
+  a black box.
+* **Built for bulk.** CSV/feed ingestion in the CLI and in the web UI, with
+  SQLite-backed jobs you can poll and export.
+* **Own your data.** Everything — cache, bulk jobs, your own labels — lives in a
+  single SQLite file you control. Nothing phones home.
+* **Small.** Flask + requests + gunicorn. No queue, no Redis, no JS build step.
+
+---
+
+## Quickstart
+
+```bash
+pip install threattrove
+
+threattrove 44d88612fea8a8f36de82e1278abb02f      # CLI
+threattrove-web --port 8080                       # UI + API on http://127.0.0.1:8080
+```
+
+Or from source:
+
+```bash
+git clone https://github.com/threattrove/threattrove && cd threattrove
+python3 -m venv .venv && . .venv/bin/activate
+pip install -e .
+```
+
+Python 3.9+. Runtime dependencies: `requests`, `flask`, `gunicorn`.
+
+---
+
+## CLI
+
+```bash
+# one indicator, text report
+threattrove 275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f
+threattrove https://example.com/login
+threattrove example.com --json
+
+# hash a local file and look it up
+threattrove --hash-file ./suspicious.exe
+
+# bulk: CSV, newline list or JSON/JSONL feed (format auto-detected)
+threattrove --csv iocs.csv --out results.csv
+threattrove --feed hashes.txt --out results.jsonl
+threattrove --feed feed.json --fail-on-malicious      # exit 3 if anything is bad
+
+# sources and engine tuning
+threattrove --list-sources
+threattrove ioc.example --sources keyless              # only keyless sources
+threattrove ioc.example --sources reputation,intel     # by category
+threattrove ioc.example --no-cache --timeout 60 --workers 8
+
+# local corpus: your own known-bad / known-good labels
+threattrove --add-local 275a021b... --label malware --note "EICAR test file"
+threattrove --list-local
+threattrove --stats
+```
+
+Exit codes: `0` success, `1` usage error, `3` `--fail-on-malicious` tripped.
+
+---
+
+## Web UI
+
+| Page | What it does |
+| --- | --- |
+| `/` | Paste a hash, URL or domain; recent lookups |
+| `/i/hash?q=…`, `/i/url?q=…`, `/i/domain?q=…` | Result page: verdict, score, per-source table |
+| `/bulk` | Upload a CSV/feed or paste a list; runs as a background job |
+| `/bulk/<job_id>` | Job progress, per-row verdicts, CSV/JSON export |
+| `/recent` | Recent lookups on this instance |
+| `/sources` | Source catalogue with live state (`active` / `needs key` / `opt-in`) |
+| `/local` | Manage the local corpus |
+| `/api` | JSON API documentation |
+
+---
+
+## JSON API
+
+All lookups accept `?fresh=1` to bypass the cache. Responses are
+VirusTotal-shaped (`data.attributes`-ish flat object with `verdict`, `score`,
+`confidence`, `results[]`).
+
+```bash
+curl -s http://127.0.0.1:8080/api/v1/hash/44d88612fea8a8f36de82e1278abb02f
+curl -s "http://127.0.0.1:8080/api/v1/url?url=https://example.com/login"
+curl -s "http://127.0.0.1:8080/api/v1/domain?domain=example.com"
+curl -s "http://127.0.0.1:8080/api/v1/lookup?q=$(echo -n evil | sha256sum | cut -d' ' -f1)"
+curl -s http://127.0.0.1:8080/api/v1/sources
+curl -s http://127.0.0.1:8080/api/v1/stats
+```
+
+Bulk over the API — submit, then poll:
+
+```bash
+curl -s -X POST http://127.0.0.1:8080/api/v1/bulk \
+     -F file=@iocs.csv -F label=incident-42
+# {"job_id":"j_ab12…","total":120,"skipped":0,"status_url":"…/api/v1/bulk/j_ab12…"}
+
+curl -s http://127.0.0.1:8080/api/v1/bulk/j_ab12…
+curl -s http://127.0.0.1:8080/api/v1/bulk/j_ab12…/items
+```
+
+Raw bodies work too (`text/plain`, one indicator per line). Limits come from
+`TT_RATE_LIMIT` (default 60/min per IP) and `TT_MAX_UPLOAD` (2 MiB).
+
+---
+
+## How a verdict is produced
+
+Each source returns `verdict`, `detections`/`total` (engines), `note` and a raw
+`detail`. Weights are additive:
+
+| Condition | Points |
+| --- | --- |
+| Source says malicious, ≥5 engines involved | +100 |
+| Source says malicious (list membership, few engines) | +40…+100 |
+| Source says suspicious | +40 |
+| Source says known-good (NSRL, whitelist) | −100 |
+| Source says clean | −20 |
+
+```
+score ≥ 100   → MALICIOUS
+score ≥ 40    → SUSPICIOUS
+score ≤ −100  → KNOWN GOOD
+score ≤ −20   → CLEAN
+otherwise     → UNKNOWN        (no data, or sources disagree)
+```
+
+`confidence = min(100, abs(score))`. Sources in the `intel` category (DNS, RDAP,
+crt.sh, reverse IP) enrich the report but never change the verdict. Engine
+ratios are only computed from sources that actually report engines — a urlscan
+"6987 scans" is a scan count, not a detection count, and is shown as `–`.
+
+Deliberate anti-noise choices: OTX pulses that carry `Whitelisted domain` or
+`Known False Positive` validation are downgraded to UNKNOWN; EICAR-style
+keyless hits are attributed to the *listing* source rather than multiplied.
+
+---
+
+## Sources
+
+21 sources are compiled in; 8 work with no key. `httpx`-free HTTP via `requests`.
+
+| Source | Kind | Category | Key | Env var |
+| --- | --- | --- | --- | --- |
+| CIRCL hashlookup | hash | reputation | keyless | — |
+| AlienVault OTX (file) | hash | reputation | keyless | — |
+| AlienVault OTX (URL) | url | reputation | keyless | — |
+| AlienVault OTX (domain/IP) | domain/ip | reputation | keyless | — |
+| urlscan.io | url/domain/ip | reputation | keyless | — |
+| DNS (Cloudflare DoH) | domain/ip | intel | keyless | — |
+| RDAP | domain/ip | intel | keyless | — |
+| crt.sh | domain | intel | keyless | — |
+| reverse IP (HackerTarget) | domain/ip | intel | keyless, **opt-in** | `TT_ENABLE_REVERSE_IP=1` |
+| VirusTotal (file/url/domain) | hash/url/domain/ip | reputation | keyed | `VT_API_KEY` |
+| MalwareBazaar | hash | reputation | keyed | `ABUSECH_AUTH_KEY` |
+| ThreatFox | hash/url/domain/ip | reputation | keyed | `ABUSECH_AUTH_KEY` |
+| URLhaus (hash + URL) | hash/url | reputation | keyed | `ABUSECH_AUTH_KEY` |
+| Hybrid Analysis | hash | reputation | keyed | `HA_API_KEY` |
+| MalShare | hash | reputation | keyed | `MALSHARE_API_KEY` |
+| Triage | hash | reputation | keyed | `TRIAGE_API_KEY` |
+| Google Safe Browsing | url/domain | reputation | keyed | `GSB_API_KEY` |
+| PhishTank | url | reputation | keyed | `PHISHTANK_APPKEY` |
+| urlscan (keyed) | url/domain/ip | reputation | keyed | `URLSCAN_API_KEY` |
+
+Notes:
+
+* abuse.ch (MalwareBazaar, ThreatFox, URLhaus) requires a free Auth-Key from
+  <https://auth.abuse.ch/> since API 3.0.0. A bad key answers **403**, which
+  ThreatTrove reports as `unauthorized` — the run continues.
+* `TT_ENABLE_REVERSE_IP` is off by default because that lookup sends the queried
+  IP/hostname to a third-party service. That's the one source gated on consent.
+* Sources without a key are simply skipped and listed as `needs key` in
+  `/sources`; they never fail a lookup.
+
+---
+
+## Configuration
+
+Copy `deploy/threattrove.env.example` and edit. The important ones:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `TT_DB` | `~/.threattrove/threattrove.db` | cache + jobs + local corpus |
+| `TT_CACHE_TTL` | `604800` | cache lifetime, seconds |
+| `TT_TIMEOUT` | `20` | per-source HTTP timeout |
+| `TT_DEADLINE` | `45` | whole-lookup budget, seconds |
+| `TT_BULK_MAX` | `5000` | indicators per bulk job / CLI run |
+| `TT_MAX_JOBS` | `2` | concurrent bulk jobs per worker |
+| `TT_MAX_UPLOAD` | `2097152` | upload cap, bytes |
+| `TT_RATE_LIMIT` | `60` | API requests/min per IP |
+| `TT_PAGE_RATE_LIMIT` | `240` | page requests/min per IP |
+| `TT_SITE_URL` | `https://threattrove.com` | canonical base URL |
+| `TT_SITE_NAME` | `ThreatTrove` | brand shown in nav, titles, OG tags |
+| `TT_ENABLE_REVERSE_IP` | *(empty)* | `1` enables reverse-IP |
+
+---
+
+## Deployment
+
+### Docker
+
+```bash
+cp deploy/threattrove.env.example .env     # add keys if you have them
+docker compose up -d --build
+curl -s http://127.0.0.1:8080/health
+```
+
+Data persists in the `threattrove-data` volume (`/data/threattrove.db`). The image
+runs as an unprivileged user with a read-only root filesystem.
+
+### systemd + nginx on threattrove.com
+
+```bash
+useradd --system --home /opt/threattrove --shell /usr/sbin/nologin threattrove
+git clone <repo> /opt/threattrove && cd /opt/threattrove
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/pip install --no-deps .
+install -d -o threattrove -g threattrove /var/lib/threattrove
+install -Dm640 deploy/threattrove.env.example /etc/threattrove/threattrove.env
+install -Dm644 deploy/threattrove.service /etc/systemd/system/threattrove.service
+systemctl daemon-reload && systemctl enable --now threattrove
+
+# TLS + reverse proxy
+apt install nginx certbot python3-certbot-nginx
+install -Dm644 deploy/nginx-threattrove.conf /etc/nginx/sites-available/threattrove.com
+ln -s /etc/nginx/sites-available/threattrove.com /etc/nginx/sites-enabled/
+rm -f /etc/nginx/sites-enabled/default
+nginx -t && systemctl reload nginx
+certbot --nginx -d threattrove.com -d www.threattrove.com
+```
+
+`deploy/gunicorn.conf.py` binds `127.0.0.1:8080`, 2 gthread workers × 8 threads,
+120s timeout (bulk lookups are slow by nature). Nginx adds TLS/HSTS, gzip,
+static caching and per-zone rate limits.
+
+**Public-instance checklist**
+
+1. Set `TT_RATE_LIMIT` low (30–60) — every lookup fans out to 8+ upstreams, and
+   they rate-limit *you* first.
+2. Keep `TT_ENABLE_REVERSE_IP` off unless your privacy notice says otherwise.
+3. Add `X-Forwarded-For` handling (already configured) so the limiter sees real
+   clients.
+4. Cache is shared, so identical indicators are only queried upstream once per
+   `TT_CACHE_TTL`.
+5. `/health` is the liveness endpoint used by the Docker healthcheck.
+
+---
+
+## Project layout
+
+```
+threattrove/
+  core.py       parse indicators, Engine (threaded, paced, deadline), Store, Report
+  sources.py    21 source implementations + verdict helpers
+  bulk.py       CSV/JSON/newline parsing, job runner, CSV export
+  cli.py        `threattrove` entry point
+  web.py        Flask app factory + `threattrove-web`
+  templates/    Jinja2 views
+  static/       app.js, style.css, favicon.svg
+scripts/smoke.py        offline parser/verdict checks + live lookups
+deploy/                 gunicorn, systemd, nginx, env example
+legacy/threattrove-v1-cli.py   original single-file CLI (superseded, kept for reference)
+Dockerfile, docker-compose.yml
+```
+
+## Testing
+
+```bash
+.venv/bin/python scripts/smoke.py --offline   # 13 parsing + 6 verdict checks
+.venv/bin/python scripts/smoke.py             # + live hash/URL/domain lookups
+```
+
+## Limitations
+
+* ThreatTrove never uploads files — it hashes locally and only sends hashes.
+* Keyless sources are free, so they are shallow: absence of a hit means "no data",
+  never "safe". Treat `UNKNOWN` as unknown.
+* No user accounts, no per-user quota: the rate limiter is per IP, meant for a
+  single node behind a proxy.
+* Bulk jobs run inside the web worker process. Two workers means two independent
+  job pools (fine for this scale; swap in a real queue if you outgrow it).
+
+## License
+
+MIT.

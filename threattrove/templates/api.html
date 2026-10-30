@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+
+{% block title %}API — {{ site_name }}{% endblock %}
+
+{% block content %}
+<h1>API</h1>
+<p class="lead">
+  JSON over HTTP, no authentication on a private deployment. Put it behind a
+  reverse proxy — or an API gateway — if you expose it to the internet.
+  Rate limit: {{ rate_limit }} requests per minute per IP.
+</p>
+
+<div class="card">
+  <h2>Endpoints</h2>
+  <table>
+    <thead><tr><th>Method</th><th>Path</th><th>Returns</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">GET</td><td class="mono wrap-cell">/api/v1/hash/&lt;md5|sha1|sha256&gt;</td><td class="note">verdict for a file hash</td></tr>
+      <tr><td class="mono">GET</td><td class="mono wrap-cell">/api/v1/url?url=&lt;url&gt;</td><td class="note">verdict for a URL</td></tr>
+      <tr><td class="mono">GET</td><td class="mono wrap-cell">/api/v1/domain?domain=&lt;name&gt;</td><td class="note">verdict for a domain</td></tr>
+      <tr><td class="mono">GET</td><td class="mono wrap-cell">/api/v1/ip?ip=&lt;addr&gt;</td><td class="note">verdict for an IP address</td></tr>
+      <tr><td class="mono">GET</td><td class="mono wrap-cell">/api/v1/lookup?q=&lt;anything&gt;</td><td class="note">auto-detects the indicator type</td></tr>
+      <tr><td class="mono">POST</td><td class="mono wrap-cell">/api/v1/bulk</td><td class="note">queue a bulk job, returns <code>202</code> + job id</td></tr>
+      <tr><td class="mono">GET</td><td class="mono wrap-cell">/api/v1/bulk/&lt;id&gt;</td><td class="note">job status and verdict counts</td></tr>
+      <tr><td class="mono">GET</td><td class="mono wrap-cell">/api/v1/bulk/&lt;id&gt;/items</td><td class="note">per-indicator results</td></tr>
+      <tr><td class="mono">GET</td><td class="mono wrap-cell">/api/v1/sources</td><td class="note">configured sources and their state</td></tr>
+      <tr><td class="mono">GET</td><td class="mono wrap-cell">/api/v1/stats</td><td class="note">instance statistics</td></tr>
+    </tbody>
+  </table>
+  <div class="hint">Append <code>&amp;fresh=1</code> to bypass the result cache.</div>
+</div>
+
+<div class="card">
+  <h2>Examples</h2>
+  <pre class="json"># single hash
+curl -s '{{ request.url_root }}api/v1/hash/44d88612fea8a8f36de82e1278abb02f' | jq .verdict
+
+# URL
+curl -s '{{ request.url_root }}api/v1/url?url=https%3A%2F%2Fexample.com%2Flogin' | jq '.verdict, .headline'
+
+# bulk CSV
+curl -s -F 'file=@feed.csv' -F 'label=weekly' {{ request.url_root }}api/v1/bulk
+
+# poll
+curl -s '{{ request.url_root }}api/v1/bulk/&lt;job_id&gt;' | jq .status</pre>
+</div>
+
+<div class="card">
+  <h2>Response shape</h2>
+  <pre class="json">{
+  "indicator": { "kind": "hash", "value": "44d88612…", "raw": "44d88612…", "hashes": {"md5": "…"} },
+  "verdict": "malicious",          // malicious | suspicious | clean | known_good | unknown
+  "confidence": 100,
+  "headline": "2 source(s) flagged this as malicious",
+  "score": 200,
+  "elapsed_seconds": 0.54,
+  "sources_checked": 2,
+  "results": [
+    { "source": "circl", "status": "found", "verdict": "malicious",
+      "detections": 0, "total": 0, "note": "listed by malshare.com",
+      "category": "reputation", "detail": {} }
+  ]
+}</pre>
+</div>
+
+<div class="card">
+  <h2>Sources on this instance</h2>
+  <p class="note" style="margin-top:0">
+    {{ sources|selectattr('active')|list|length }} of {{ sources|length }} are active.
+  </p>
+  <table>
+    <thead><tr><th>Source</th><th>Supports</th><th>Status</th></tr></thead>
+    <tbody>
+    {% for s in sources %}
+      <tr>
+        <td class="mono">{{ s.name }}</td>
+        <td class="note">{{ s.kinds|join(', ') }}</td>
+        <td>
+          {% if s.state == 'active' %}<span class="tag clean">active</span>
+          {% elif s.state == 'disabled' %}<span class="tag unknown">opt-in</span>
+          {% else %}<span class="tag error">needs key</span>{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

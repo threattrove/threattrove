@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+
+{% block title %}Recent lookups — {{ site_name }}{% endblock %}
+
+{% block content %}
+<h1>Recent lookups</h1>
+<p class="lead">The last {{ rows|length }} indicators resolved on this instance.</p>
+
+<div class="card">
+  {% if rows %}
+  <table>
+    <thead><tr><th>Indicator</th><th>Type</th><th>Verdict</th><th>When</th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        <td class="mono wrap-cell">
+          <a href="{{ url_for('result_page', kind=r.kind, v=r.value) }}">{{ r.value }}</a>
+        </td>
+        <td class="note">{{ r.kind }}</td>
+        <td><span class="tag {{ r.verdict }}">{{ verdict_label.get(r.verdict, r.verdict) }}</span></td>
+        <td class="note" title="{{ fmt_ts(r.ts) }}">{{ rel_time(r.ts) }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">Nothing here yet.</div>
+  {% endif %}
+</div>
+{% endblock %}

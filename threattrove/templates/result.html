@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+
+{% set v = report.verdict %}
+{% block title %}{{ indicator.value if indicator.value|length < 70 else indicator.value[:67] ~ '…' }} — {{ verdict_label.get(v, v) }} · {{ site_name }}{% endblock %}
+
+{% block content %}
+<div class="ind-head">
+  <span class="ind-kind">{{ indicator.label }}</span>
+  <span class="ind-value" id="ind-value">{{ indicator.value }}</span>
+  <span class="ind-actions">
+    <button class="btn ghost small" data-copy="#ind-value">Copy</button>
+    <a class="btn ghost small" href="{{ url_for('result_page', kind=indicator.kind, v=indicator.value, fresh=1) }}">Re-query</a>
+  </span>
+</div>
+
+{% set extra = namespace(items=[]) %}
+{% for algo, digest in indicator.hashes.items() %}
+  {% if digest != indicator.value %}{% set _ = extra.items.append(algo ~ ': ' ~ digest) %}{% endif %}
+{% endfor %}
+{% if extra.items %}
+<div class="note" style="margin:-8px 0 16px;font-family:var(--mono);font-size:12px">
+  {{ extra.items|join('  ·  ') }}
+</div>
+{% endif %}
+
+<div class="verdict-bar {{ v }}">
+  <span class="pill {{ v }}">{{ verdict_label.get(v, v) }}</span>
+  <div>
+    <div class="verdict-head">
+      <span class="verdict-headline">{{ report.headline }}</span>
+    </div>
+    <div class="verdict-sub">
+      {{ report.confidence }}% confidence
+      · {{ report.sources_checked }} security sources queried
+      · {{ '%.2f'|format(report.elapsed_seconds) }}s
+    </div>
+  </div>
+  {% set det = namespace(n=0, t=0) %}
+  {% for r in report.results %}
+    {% if r.total and r.detail and r.detail.get('engines') %}
+      {% set det.n = det.n + r.detections %}{% set det.t = det.t + r.total %}
+    {% endif %}
+  {% endfor %}
+  {% if det.t %}
+  <div class="verdict-ratio"><b>{{ det.n }}/{{ det.t }}</b>engine detections</div>
+  {% endif %}
+</div>
+
+<div class="grid two" style="margin-top:22px">
+  <div>
+    <div class="card">
+      <h2>Security vendors &amp; feeds</h2>
+      {% if rep %}
+      <table>
+        <thead>
+          <tr><th>Source</th><th>Verdict</th><th>Engines</th><th>Detail</th></tr>
+        </thead>
+        <tbody>
+        {% for r in rep %}
+          <tr>
+            <td><span class="src-dot {{ r.verdict }}"></span><span class="src-name">{{ r.source }}</span></td>
+            <td><span class="tag {{ r.verdict }}">{{ verdict_label.get(r.verdict, r.verdict) }}</span></td>
+            <td class="ratio">{% if r.total and r.detail and r.detail.get('engines') %}{{ r.detections }}/{{ r.total }}{% else %}–{% endif %}</td>
+            <td class="note">{{ r.note }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <div class="empty">No reputation source answered for this indicator.</div>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <h2>Context &amp; intelligence</h2>
+      {% if intel %}
+      <table>
+        <thead>
+          <tr><th>Source</th><th>Type</th><th>Detail</th></tr>
+        </thead>
+        <tbody>
+        {% for r in intel %}
+          <tr>
+            <td><span class="src-name">{{ r.source }}</span></td>
+            <td><span class="tag intel">{{ r.category }}</span></td>
+            <td class="note">{{ r.note }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <div class="empty">No enrichment available for this indicator type.</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div>
+    <div class="card">
+      <h2>Details</h2>
+      <table>
+        <tbody>
+          <tr><td class="note">Type</td><td>{{ indicator.label }}</td></tr>
+          <tr><td class="note">Normalised</td><td class="mono wrap-cell">{{ indicator.value }}</td></tr>
+          {% if indicator.host %}<tr><td class="note">Host</td><td class="mono">{{ indicator.host }}</td></tr>{% endif %}
+          {% if indicator.domain and indicator.domain != indicator.value %}<tr><td class="note">Registrable domain</td><td class="mono">{{ indicator.domain }}</td></tr>{% endif %}
+          {% if indicator.path %}<tr><td class="note">Path</td><td class="mono wrap-cell">{{ indicator.path }}</td></tr>{% endif %}
+          <tr><td class="note">Score</td><td class="mono">{{ report.score }}</td></tr>
+          <tr><td class="note">Flagged by</td><td class="note">{{ report.results|selectattr('verdict', 'in', ['malicious','suspicious'])|map(attribute='source')|join(', ') or '–' }}</td></tr>
+          <tr><td class="note">Looked up</td><td class="note">{{ fmt_ts(report.created) }}</td></tr>
+        </tbody>
+      </table>
+      <div class="form-actions">
+        <a class="btn ghost small" href="{{ url_for('local_page') }}">Add local verdict</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <details>
+        <summary>Raw JSON response</summary>
+        <pre class="json">{{ raw_json }}</pre>
+      </details>
+    </div>
+  </div>
+</div>
+{% endblock %}

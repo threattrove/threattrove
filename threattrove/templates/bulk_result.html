@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+
+{% block title %}Job {{ job.id }} — {{ site_name }}{% endblock %}
+
+{% block content %}
+<div class="ind-head">
+  <span class="ind-kind">Job</span>
+  <span class="ind-value">{{ job.label or job.id }}</span>
+  <span class="ind-actions">
+    <a class="btn ghost small" href="{{ url_for('bulk_export_csv', job_id=job.id) }}">CSV</a>
+    <a class="btn ghost small" href="{{ url_for('bulk_export_json', job_id=job.id) }}">JSON</a>
+    <a class="btn ghost small" href="{{ url_for('bulk_page') }}">New job</a>
+  </span>
+</div>
+
+<div class="card" id="job-card"
+     data-job="{{ job.id }}"
+     data-status="{{ job.status }}"
+     data-done="{{ job.done }}"
+     data-total="{{ job.total }}">
+  <div class="progress"><i id="bar" style="width: {{ (job.done * 100 / job.total) if job.total else 0 }}%"></i></div>
+  <div class="progress-meta">
+    <span id="progress-text">{{ job.done }} / {{ job.total }} processed</span>
+    <span id="status-text">{{ job.status }}</span>
+  </div>
+
+  {% if job.error %}
+  <div class="alert error" style="margin-top:14px">{{ job.error }}</div>
+  {% endif %}
+
+  <div class="counts">
+    {% for verdict, label in [('malicious','Malicious'),('suspicious','Suspicious'),('clean','Clean'),('known_good','Known good'),('unknown','Unknown'),('pending','Pending'),('error','Errors')] %}
+      {% if summary.get(verdict) %}
+      <div class="count">{{ label }}<b>{{ summary.get(verdict) }}</b></div>
+      {% endif %}
+    {% endfor %}
+  </div>
+
+  <div class="note">
+    Started {{ fmt_ts(job.created) }}
+    {% if job.finished %} · finished {{ fmt_ts(job.finished) }}{% endif %}
+    {% if job.skipped %} · {{ job.skipped }} unparsable line(s) skipped{% endif %}
+    · id <span class="mono">{{ job.id }}</span>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Results</h2>
+  {% if items %}
+  <table id="items">
+    <thead>
+      <tr><th>#</th><th>Indicator</th><th>Verdict</th><th>Score</th><th>Detail</th></tr>
+    </thead>
+    <tbody>
+    {% for it in items %}
+      <tr>
+        <td class="note mono">{{ it.idx + 1 }}</td>
+        <td class="mono wrap-cell">
+          <a href="{{ url_for('result_page', kind=it.kind, v=it.value) }}">{{ it.value }}</a>
+        </td>
+        <td>
+          {% if it.status == 'pending' %}
+            <span class="tag unknown">pending</span>
+          {% else %}
+            <span class="tag {{ it.verdict }}">{{ verdict_label.get(it.verdict, it.verdict) }}</span>
+          {% endif %}
+        </td>
+        <td class="ratio">{{ it.score if it.score is not none else '–' }}</td>
+        <td class="note">{{ it.headline or '' }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">This job has no items.</div>
+  {% endif %}
+</div>
+
+{% if job.status in ('queued', 'running') %}
+<script>
+  // Lightweight polling; stops as soon as the job finishes.
+  (function () {
+    const card = document.getElementById('job-card');
+    const id = card.dataset.job;
+    const tick = async () => {
+      try {
+        const r = await fetch(`/api/v1/bulk/${encodeURIComponent(id)}`, {
+          headers: { 'Accept': 'application/json' }
+        });
+        if (!r.ok) return;
+        const j = await r.json();
+        const pct = j.total ? Math.round(j.done * 100 / j.total) : 0;
+        document.getElementById('bar').style.width = pct + '%';
+        document.getElementById('progress-text').textContent =
+          `${j.done} / ${j.total} processed`;
+        document.getElementById('status-text').textContent = j.status;
+        if (j.status === 'done' || j.status === 'error') {
+          window.location.reload();
+        }
+      } catch (e) { /* keep polling */ }
+    };
+    setInterval(tick, 2000);
+  })();
+</script>
+{% endif %}
+{% endblock %}

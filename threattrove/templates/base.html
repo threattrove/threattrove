@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ site_name }} — reputation lookup for hashes, URLs and domains{% endblock %}</title>
+  <meta name="description" content="Self-hosted reputation lookups for file hashes, URLs, domains and IPs. Aggregates free and keyed threat-intelligence feeds into one verdict.">
+  <meta name="color-scheme" content="dark">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
+  <meta property="og:site_name" content="{{ site_name }}">
+  <meta property="og:title" content="{% block og_title %}{{ site_name }}{% endblock %}">
+  <meta property="og:description" content="Reputation lookup for file hashes, URLs and domains.">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="wrap topbar-inner">
+    <a class="brand" href="{{ url_for('index') }}">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3l7 4v5c0 4.2-2.9 7.6-7 9-4.1-1.4-7-4.8-7-9V7z"/>
+          <path d="M9 12l2 2 4-4"/>
+        </svg>
+      </span>
+      <span class="brand-name">{{ site_name }}</span>
+    </a>
+
+    <form class="searchbar" action="{{ url_for('search') }}" method="get" role="search">
+      <input type="text" name="q" id="q" autocomplete="off" spellcheck="false"
+             placeholder="Search a hash, URL, domain or IP…"
+             aria-label="Search indicator"
+             value="{{ request.args.get('q', '') }}">
+      <button type="submit" aria-label="Look up">Look up</button>
+    </form>
+
+    <nav class="nav">
+      <a href="{{ url_for('bulk_page') }}" {% if request.endpoint == 'bulk_page' %}class="active"{% endif %}>Bulk</a>
+      <a href="{{ url_for('recent_page') }}" {% if request.endpoint == 'recent_page' %}class="active"{% endif %}>Recent</a>
+      <a href="{{ url_for('sources_page') }}" {% if request.endpoint == 'sources_page' %}class="active"{% endif %}>Sources</a>
+      <a href="{{ url_for('api_docs') }}" {% if request.endpoint == 'api_docs' %}class="active"{% endif %}>API</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main" class="wrap">
+  {% block content %}{% endblock %}
+</main>
+
+<footer class="footer">
+  <div class="wrap footer-inner">
+    <span>{{ site_name }} v{{ version }}</span>
+    <span class="dot">·</span>
+    <span>aggregates public and keyed threat-intelligence feeds</span>
+    <span class="dot">·</span>
+    <a href="{{ url_for('api_docs') }}">API</a>
+    <span class="grow"></span>
+    <span class="muted">&copy; {{ years }}</span>
+  </div>
+</footer>
+
+<script src="{{ url_for('static', filename='app.js') }}" defer></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

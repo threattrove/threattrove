@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+
+{% block title %}{{ site_name }} — check a file hash, URL or domain{% endblock %}
+
+{% block content %}
+<section class="hero">
+  <h1>Know what an indicator is before you touch it.</h1>
+  <p>
+    Paste a file hash, URL, domain or IP address. {{ site_name }} queries every
+    source it can reach, then folds the answers into one verdict you can act on.
+  </p>
+
+  <form class="searchbar" action="{{ url_for('search') }}" method="get" role="search">
+    <input type="text" name="q" autocomplete="off" spellcheck="false"
+           placeholder="sha256, md5, https://…, example.com, 8.8.8.8"
+           aria-label="Indicator">
+    <button type="submit">Look up</button>
+  </form>
+
+  <div class="chips">
+    <span class="chips-label">try:</span>
+    <button class="chip" data-fill="44d88612fea8a8f36de82e1278abb02f">EICAR md5</button>
+    <button class="chip" data-fill="275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f">EICAR sha256</button>
+    <button class="chip" data-fill="https://example.com/login">a URL</button>
+    <button class="chip" data-fill="example.com">a domain</button>
+  </div>
+</section>
+
+<div class="grid two">
+  <div class="card">
+    <h2>Recent lookups</h2>
+    {% if recent %}
+    <table>
+      <thead>
+        <tr><th>Indicator</th><th>Verdict</th><th>When</th></tr>
+      </thead>
+      <tbody>
+        {% for r in recent %}
+        <tr>
+          <td class="mono wrap-cell">
+            <a href="{{ url_for('result_page', kind=r.kind, v=r.value) }}">{{ r.value }}</a>
+          </td>
+          <td><span class="tag {{ r.verdict }}">{{ verdict_label.get(r.verdict, r.verdict) }}</span></td>
+          <td class="note">{{ rel_time(r.ts) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <div class="form-actions">
+      <a class="btn ghost small" href="{{ url_for('recent_page') }}">View all</a>
+    </div>
+    {% else %}
+    <div class="empty">No lookups yet. Try a hash above.</div>
+    {% endif %}
+  </div>
+
+  <div>
+    <div class="card">
+      <h2>Coverage</h2>
+      <div class="stats">
+        <div class="stat"><b>{{ sources|selectattr('active')|list|length }}</b><span>sources live</span></div>
+        <div class="stat"><b>{{ stats.lookups_total }}</b><span>lookups</span></div>
+        <div class="stat"><b>{{ stats.cached_entries }}</b><span>cached</span></div>
+        <div class="stat"><b>{{ stats.malicious_total }}</b><span>malicious</span></div>
+      </div>
+      <hr class="sep">
+      <p class="note" style="margin:0">
+        {{ sources|length }} sources configured, {{ sources|selectattr('active')|list|length }}
+        answering right now. Each source is weighted by how strongly it asserts a
+        verdict; the rest activate once their API key is set. See
+        <a href="{{ url_for('sources_page') }}">sources</a>.
+      </p>
+    </div>
+
+    <div class="card">
+      <h2>Bulk enrichment</h2>
+      <p class="note" style="margin-top:0">
+        Drop a CSV export from any feed, a newline list, or a JSON array.
+        Headers are auto-detected and every indicator lands in a queue you can
+        poll from the browser or the API.
+      </p>
+      <a class="btn" href="{{ url_for('bulk_page') }}">Start a bulk job</a>
+    </div>
+  </div>
+</div>
+{% endblock %}

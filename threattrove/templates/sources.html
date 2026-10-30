@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+
+{% block title %}Data sources — {{ site_name }}{% endblock %}
+
+{% block content %}
+<h1>Data sources</h1>
+<p class="lead">
+  Every source is queried in parallel and weighted by how strongly it asserts a
+  verdict. Sources marked <span class="tag intel">context</span> add enrichment
+  only — they never change the verdict.
+</p>
+
+<div class="card">
+  <table>
+    <thead>
+      <tr><th>Source</th><th>Supports</th><th>Category</th><th>Auth</th><th>Status</th></tr>
+    </thead>
+    <tbody>
+    {% for s in sources %}
+      <tr>
+        <td class="src-name">
+          {% if s.homepage %}<a href="{{ s.homepage }}" rel="noopener noreferrer nofollow" target="_blank">{{ s.display }}</a>
+          {% else %}{{ s.display }}{% endif %}
+          <div class="note mono" style="font-size:11px">{{ s.name }}</div>
+        </td>
+        <td class="note">{{ s.kinds|join(', ') }}</td>
+        <td><span class="tag {{ 'intel' if s.category == 'intel' else 'unknown' }}">{{ s.category }}</span></td>
+        <td class="mono note">{{ 'none' if s.keyless else (s.env_key or 'none') }}</td>
+        <td>
+          {% if s.state == 'active' %}<span class="tag clean">active</span>
+          {% elif s.state == 'disabled' %}<span class="tag unknown">opt-in</span>
+          {% else %}<span class="tag error">needs key</span>{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2>Enabling keyed sources</h2>
+  <p class="note" style="margin-top:0">
+    Set the environment variable and restart the service. Keys are never sent
+    to the browser or logged.
+  </p>
+  <pre class="json"># /etc/threattrove/threattrove.env
+ABUSECH_AUTH_KEY=...      # auth.abuse.ch — MalwareBazaar, ThreatFox, URLhaus
+VT_API_KEY=...            # virustotal.com — files, URLs, domains, IPs
+OTX_API_KEY=...           # otx.alienvault.com (optional, raises limits)
+URLSCAN_API_KEY=...       # urlscan.io (optional, raises limits)
+HA_API_KEY=...            # hybrid-analysis.com
+MALSHARE_API_KEY=...      # malshare.com
+TRIAGE_API_KEY=...        # tria.ge
+GSB_API_KEY=...           # Google Safe Browsing v4
+PHISHTANK_APPKEY=...      # phishtank.com</pre>
+  <p class="note">
+    The free sources (CIRCL hashlookup, AlienVault OTX, urlscan.io search,
+    DNS, RDAP and Certificate Transparency) answer without any key, so a fresh
+    install is useful immediately. Reverse IP lookups are free but rate
+    limited, so they stay off until you set <code>TT_ENABLE_REVERSE_IP=1</code>.
+  </p>
+</div>
+{% endblock %}
