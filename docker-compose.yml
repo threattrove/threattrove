@@ -1,7 +1,7 @@
 services:
   threattrove:
     build: .
-    image: threattrove:2.0.0
+    image: threattrove:2.0.1
     container_name: threattrove
     restart: unless-stopped
     ports:
