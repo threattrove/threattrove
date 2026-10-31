@@ -234,6 +234,14 @@ Notes:
   IP/hostname to a third-party service. That's the one source gated on consent.
 * Sources without a key are simply skipped and listed as `needs key` in
   `/sources`; they never fail a lookup.
+* Hybrid Analysis is read through `GET /api/v2/overview/{sha256}`; the older
+  `POST /search/hash` was withdrawn in API 2.35.0 and now answers `410 Gone`.
+  Its `scanners_v2` results feed the `x/y engines` figure on the result page,
+  and only scanners that actually returned a judgement are counted (a scanner
+  in `error` is not a clean engine). A high sandbox `threat_score` with no
+  scanner agreement and no named family is reported as `suspicious`, not
+  `malicious`, because installers trip behavioural heuristics — an official
+  7-Zip installer scores 75 with every engine clean.
 
 ---
 

@@ -123,6 +123,68 @@ def report_view() -> None:
         check(key in payload, f"json has {key}")
 
 
+def sandbox_ha() -> None:
+    """Hybrid Analysis verdict logic, driven by recorded API shapes."""
+    print("\n[sandbox]")
+    from threattrove.sources import HybridAnalysis
+    ha = HybridAnalysis()
+    sha = "0" * 64
+
+    def entry(verdict, score=None, family=None, **scanners):
+        return {"sha256": sha, "verdict": verdict, "threat_score": score,
+                "vx_family": family, "last_file_name": "x.exe",
+                "type": "PE32 executable (GUI) Intel 80386", "size": 1234,
+                "analysis_start_time": "2025-01-02 03:04:05",
+                "whitelisted": False, "scanners_v2": scanners}
+
+    clean_md = {"metadefender": {"status": "clean"}}
+    bad_md = {"metadefender": {"status": "malicious"}}
+    err_cs = {"crowdstrike_ml": {"status": "error"}}
+
+    # Authentic PuTTY: the sandbox found nothing and one scanner says clean.
+    res = ha._judge(entry("no specific threat", None, None,
+                          **{**clean_md, **err_cs}), sha)
+    check(res.verdict == core.VERDICT_CLEAN, f"clean sample -> clean ({res.verdict})")
+    check(res.detections == 0 and res.total == 1,
+          f"errored scanner excluded from the denominator ({res.detections}/{res.total})")
+    check(res.detail["engines"] is True, "detail advertises engine results")
+
+    # Authentic 7-Zip installer: behavioural score with zero scanner agreement.
+    res = ha._judge(entry("malicious", 75, None, **{**clean_md, **err_cs}), sha)
+    check(res.verdict == core.VERDICT_SUSPICIOUS,
+          f"score without engine agreement -> suspicious ({res.verdict})")
+    check("0/1" in res.note, f"note admits the disagreement: {res.note}")
+
+    # EICAR: a scanner flagged and the family is named.
+    res = ha._judge(entry("malicious", 100, "EICAR", **{**bad_md, **err_cs}), sha)
+    check(res.verdict == core.VERDICT_MALICIOUS, "flagged scanner -> malicious")
+    check(res.detections == 1 and res.total == 1, f"engine ratio {res.detections}/{res.total}")
+    check(res.detail["family"] == "EICAR", "family surfaced in detail")
+
+    # A named family alone, with no scanner data, is still a determination.
+    res = ha._judge(entry("malicious", None, "Emotet", **err_cs), sha)
+    check(res.verdict == core.VERDICT_MALICIOUS, "named family -> malicious")
+
+    # No usable scanner at all -> engines flag off, nothing to compare.
+    res = ha._judge(entry("suspicious", None, None, **err_cs), sha)
+    check(res.verdict == core.VERDICT_SUSPICIOUS, "suspicious verdict kept")
+    check(res.detail["engines"] is False, "no usable scanners -> engines False")
+
+    rep = core.Report(indicator=core.parse_indicator(sha))
+    rep.results = [
+        ha._judge(entry("malicious", 100, "EICAR", **{**bad_md, **err_cs}), sha),
+        core.SourceResult(source="otx", status="found",
+                          verdict=core.VERDICT_MALICIOUS, note="2 pulse(s)"),
+    ]
+    check(rep.verdict() == core.VERDICT_MALICIOUS, "sandbox + community -> malicious")
+    check(rep.engine_ratio() == (1, 1), f"engine_ratio {rep.engine_ratio()}")
+    ident = rep.file_identity()
+    check(ident.get("name") == "x.exe", f"sandbox names the file ({ident.get('name')})")
+    check(ident.get("size") == "1.2 KB", f"sandbox size rendered ({ident.get('size')})")
+    classes = {c["key"]: c for c in rep.evidence()}
+    check(classes.get("sandbox", {}).get("hit") == 1, "HA lands in the sandbox class")
+
+
 def live(skip: bool) -> None:
     from threattrove import Engine, Store, ALL_SOURCES
     import tempfile
@@ -169,5 +231,6 @@ if __name__ == "__main__":
     parsing()
     verdicts()
     report_view()
+    sandbox_ha()
     live("--offline" in sys.argv)
     print("\nall checks passed")

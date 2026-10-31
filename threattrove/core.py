@@ -22,7 +22,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
 
-VERSION = "2.1.0"
+VERSION = "2.1.1"
 
 DEFAULT_TIMEOUT = float(os.environ.get("TT_TIMEOUT", "20"))
 CACHE_TTL_SECONDS = int(os.environ.get("TT_CACHE_TTL", str(7 * 24 * 3600)))
@@ -493,6 +493,11 @@ class Report:
                 take("type", detail.get("type_description"))
                 take("size", detail.get("size"))
                 take("first_seen", detail.get("first_submission"))
+            elif r.source == "hybridanalysis":
+                take("name", detail.get("file_name"))
+                take("type", detail.get("type"))
+                take("size", detail.get("size"))
+                take("first_seen", detail.get("first_seen"))
             elif r.source == "malwarebazaar":
                 take("type", detail.get("file_type"))
                 take("first_seen", detail.get("first_seen"))

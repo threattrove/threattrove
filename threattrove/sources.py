@@ -278,43 +278,181 @@ class VirusTotalFile(Source):
         return _vt_parse(self, r, file_hash=h)
 
 
+#: Hybrid Analysis scanner states that amount to a usable judgement. A
+#: scanner in ``error`` did not analyse the file, so it must not pad the total.
+HA_USABLE_STATES = {"malicious", "suspicious", "clean", "no specific threat",
+                    "unknown", "whitelisted", "no threat"}
+HA_FLAGGED_STATES = {"malicious", "suspicious"}
+
+
 class HybridAnalysis(Source):
+    """Falcon Sandbox / Hybrid Analysis.
+
+    Uses ``GET /api/v2/overview/{hash}``. The older ``POST /search/hash``
+    was deprecated in API 2.35.0 and now answers 410 Gone, so it is only kept
+    as a fallback for keys older than that cut-off.
+
+    The response carries three things worth surfacing: the file's *name*
+    (``last_file_name``), the sandbox verdict, and per-scanner results
+    (``scanners_v2``). That is the only source in this list besides VirusTotal
+    that says something about the file itself rather than about where a copy of
+    it was seen.
+
+    Verdict handling is deliberately split: a scanner hit or a named malware
+    family is a determination and can convict; a high ``threat_score`` with no
+    scanner agreement is not, because installers trip behavioural heuristics
+    (an authentic 7-Zip installer scores 75 with every scanner clean).
+    """
+
     name = "hybridanalysis"
     display = "Hybrid Analysis"
     env_key = "HA_API_KEY"
     homepage = "https://www.hybrid-analysis.com/"
     kinds = (KIND_HASH,)
+    min_interval = 0.3      # free tier: 200 requests/minute
+
+    API = "https://www.hybrid-analysis.com/api/v2"
+
+    def _headers(self) -> Dict[str, str]:
+        return {"api-key": self.key() or "", "User-Agent": "Falcon Sandbox",
+                "Accept": "application/json"}
 
     def lookup(self, ind: Indicator) -> SourceResult:
         h = ind.hashes.get("sha256") or ind.preferred_hash()
-        r = self.session().post(
-            "https://www.hybrid-analysis.com/api/v2/search/hash",
-            data={"hash": h},
-            headers={"api-key": self.key() or "", "User-Agent": "Falcon Sandbox"},
-            timeout=DEFAULT_TIMEOUT)
+        if not h:
+            return self.result(status="skipped", note="no digest")
+
+        r = self.session().get(f"{self.API}/overview/{h}",
+                               headers=self._headers(), timeout=DEFAULT_TIMEOUT)
+        entry = self._entry(r)
+        if isinstance(entry, SourceResult):
+            if entry.status == "not_found":
+                entry.note = "no sandbox report"
+            return entry
+        if entry is None:            # deprecated endpoint fallback
+            entry = self._via_search(h)
+            if isinstance(entry, SourceResult):
+                return entry
+            if entry is None:
+                return self.result(status="not_found", note="no sandbox report")
+
+        return self._judge(entry, h)
+
+    def _entry(self, r: requests.Response):
+        """Normalise the transport-level outcomes into a SourceResult or dict."""
         if r.status_code in (401, 403):
             return self.result(status="unauthorized", note="invalid API key")
+        if r.status_code == 404:
+            return self.result(status="not_found")
+        if r.status_code == 410:
+            return None              # deprecated: caller retries the old way
+        if r.status_code == 429:
+            return self.result(status="error", note="rate limited (200/min)")
         if r.status_code != 200:
             return self.result(status="error", note=f"HTTP {r.status_code}")
-        data = r.json()
-        if not data:
+        try:
+            data = r.json()
+        except ValueError:
+            return self.result(status="error", note="bad JSON")
+        if isinstance(data, list):
+            data = data[0] if data else None
+        if not isinstance(data, dict) or not data:
             return self.result(status="not_found")
-        entry = data[0] if isinstance(data, list) else data
-        verdict_raw = (entry.get("verdict") or "").lower()
-        score = entry.get("threat_score") or 0
-        detail = {"verdict": entry.get("verdict"), "threat_score": score,
-                  "family": entry.get("vx_family"),
-                  "av_detect": entry.get("av_detect")}
-        link = f"https://www.hybrid-analysis.com/search?query={h}"
-        if verdict_raw == "malicious" or score >= 75:
+        if not (data.get("sha256") or data.get("last_file_name") or
+                data.get("scanners_v2") or data.get("verdict")):
+            return self.result(status="not_found")
+        return data
+
+    def _via_search(self, h: str):
+        """Fallback for keys issued before API 2.35.0 (pre-2026-08-21)."""
+        r = self.session().get(f"{self.API}/search/hash", params={"hash": h},
+                               headers=self._headers(), timeout=DEFAULT_TIMEOUT)
+        if r.status_code != 200:
+            return self.result(status="error", note=f"HTTP {r.status_code}")
+        try:
+            data = r.json()
+        except ValueError:
+            return self.result(status="error", note="bad JSON")
+        reports = (data or {}).get("reports") or []
+        if not reports:
+            return None
+        best = max(reports, key=lambda x: bool(x.get("verdict")))
+        return {"sha256": h, "verdict": best.get("verdict"),
+                "last_file_name": best.get("filename"),
+                "threat_score": None, "vx_family": None, "scanners_v2": {}}
+
+    def _judge(self, entry: Dict[str, Any], h: str) -> SourceResult:
+        scanners = entry.get("scanners_v2") or {}
+        usable = {k: v for k, v in scanners.items()
+                  if isinstance(v, dict)
+                  and (v.get("status") or "").lower() in HA_USABLE_STATES}
+        flagged = sorted(k for k, v in usable.items()
+                         if (v.get("status") or "").lower() in HA_FLAGGED_STATES)
+        total = len(usable)
+        family = (entry.get("vx_family") or "").strip()
+        verdict_raw = (entry.get("verdict") or "").strip().lower()
+        score = entry.get("threat_score")
+        whitelisted = bool(entry.get("whitelisted"))
+
+        detail: Dict[str, Any] = {
+            "engines": bool(total),
+            "malicious": len(flagged),
+            "suspicious": 0,
+            "total_engines": total,
+            "flagged_by": flagged,
+            "verdict": entry.get("verdict"),
+            "threat_score": score,
+            "family": family or None,
+            "file_name": entry.get("last_file_name"),
+            "type": entry.get("type"),
+            "size": entry.get("size"),
+            "first_seen": _short(entry.get("analysis_start_time"), 10),
+            "tags": (entry.get("tags") or [])[:5],
+        }
+        link = f"https://www.hybrid-analysis.com/sample/{h}"
+
+        # 1. A scanner hit is a direct determination about the file.
+        if flagged:
             return self.result(status="found", verdict=VERDICT_MALICIOUS,
-                               note=f"{entry.get('verdict')} (score {score})",
+                               detections=len(flagged), total=total,
+                               note=f"{len(flagged)}/{total} scanner(s) flagged"
+                                    + (f" - {family}" if family else ""),
                                link=link, detail=detail)
-        if verdict_raw == "suspicious" or score >= 50:
+
+        # 2. A named malware family is also a determination.
+        if family and verdict_raw not in ("no specific threat", "no threat"):
+            return self.result(status="found", verdict=VERDICT_MALICIOUS,
+                               detections=0, total=total,
+                               note=f"family: {family}", link=link, detail=detail)
+
+        # 3. Verdict with no supporting scanner data: a lead, not a finding.
+        if verdict_raw == "malicious" or (isinstance(score, int) and score >= 75):
+            note = f"sandbox scored {score if score is not None else 'malicious'}"
+            note += (f", 0/{total} scanners agree" if total else ", no scanner data")
             return self.result(status="found", verdict=VERDICT_SUSPICIOUS,
-                               note=f"{entry.get('verdict')} (score {score})",
+                               detections=0, total=total, note=note,
                                link=link, detail=detail)
+
+        if verdict_raw == "suspicious":
+            return self.result(status="found", verdict=VERDICT_SUSPICIOUS,
+                               detections=0, total=total,
+                               note="sandbox: suspicious" +
+                                    (f", 0/{total} scanners agree" if total else ""),
+                               link=link, detail=detail)
+
+        # 4. The sandbox looked and found nothing.
+        if whitelisted or verdict_raw in ("no specific threat", "no threat",
+                                         "benign", "whitelisted"):
+            name = entry.get("last_file_name") or "file"
+            note = f"no threat found ({name})"
+            if total:
+                note = f"0/{total} scanner(s) flagged - {name}"
+            return self.result(status="found", verdict=VERDICT_CLEAN,
+                               detections=0, total=total, note=note,
+                               link=link, detail=detail)
+
         return self.result(status="found", verdict=VERDICT_UNKNOWN,
+                           detections=0, total=total,
                            note=_short(entry.get("verdict") or "no verdict", 40),
                            link=link, detail=detail)
 
