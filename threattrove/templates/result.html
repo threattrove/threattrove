@@ -30,7 +30,7 @@
       <span class="verdict-headline">{{ report.headline }}</span>
     </div>
     <div class="verdict-sub">
-      {{ report.confidence }}% confidence
+      {% set corr = report.corroboration or 0 %}{% if corr %}{{ corr }} independent source{{ '' if corr == 1 else 's' }} {{ 'agrees' if corr == 1 else 'agree' }} · {% endif %}{{ report.confidence }}% confidence
       · {{ report.sources_checked }} security sources queried
       · {{ '%.2f'|format(report.elapsed_seconds) }}s
     </div>
@@ -45,6 +45,31 @@
   <div class="verdict-ratio"><b>{{ det.n }}/{{ det.t }}</b>engine detections</div>
   {% endif %}
 </div>
+
+{% set ev = report.evidence or [] %}
+{% if ev %}
+<div class="evidence-strip">
+  <span class="ev-label">Evidence</span>
+  {% for evc in ev %}
+  <span class="ev {{ evc.key }}{% if evc.hit %} hit{% endif %}" title="{{ evc.description }} - {{ evc.sources|join(', ') }}">
+    {{ evc.label }}<b class="ev-count">{{ evc.hit }}/{{ evc.answered }}</b>
+  </span>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% set ident = report.file_identity or {} %}
+{% if ident.name %}
+<div class="identity">
+  <span class="ident-name">{{ ident.name }}</span>
+  {% if ident.product %}<span class="ident-meta">{{ ident.product }}</span>{% endif %}
+  {% if ident.platform %}<span class="ident-meta">{{ ident.platform }}</span>{% endif %}
+  {% if ident.type %}<span class="ident-meta">{{ ident.type }}</span>{% endif %}
+  {% if ident.size %}<span class="ident-meta">{{ ident.size }}</span>{% endif %}
+  {% if ident.first_seen %}<span class="ident-meta">first seen {{ ident.first_seen }}</span>{% endif %}
+  <span class="note">named by {{ ident.source }}</span>
+</div>
+{% endif %}
 
 <div class="grid two" style="margin-top:22px">
   <div>
@@ -104,7 +129,9 @@
           {% if indicator.host %}<tr><td class="note">Host</td><td class="mono">{{ indicator.host }}</td></tr>{% endif %}
           {% if indicator.domain and indicator.domain != indicator.value %}<tr><td class="note">Registrable domain</td><td class="mono">{{ indicator.domain }}</td></tr>{% endif %}
           {% if indicator.path %}<tr><td class="note">Path</td><td class="mono wrap-cell">{{ indicator.path }}</td></tr>{% endif %}
-          <tr><td class="note">Score</td><td class="mono">{{ report.score }}</td></tr>
+          <tr><td class="note">Weighted score</td><td class="mono">{{ report.score }}</td></tr>
+          <tr><td class="note">Corroboration</td><td class="mono">{{ report.corroboration }}</td></tr>
+          {% if report.families %}<tr><td class="note">Family</td><td class="note">{{ report.families|join(', ') }}</td></tr>{% endif %}
           <tr><td class="note">Flagged by</td><td class="note">{{ report.results|selectattr('verdict', 'in', ['malicious','suspicious'])|map(attribute='source')|join(', ') or '–' }}</td></tr>
           <tr><td class="note">Looked up</td><td class="note">{{ fmt_ts(report.created) }}</td></tr>
         </tbody>

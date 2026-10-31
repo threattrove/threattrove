@@ -49,12 +49,78 @@ def parsing() -> None:
 
 def verdicts() -> None:
     print("\n[verdicts]")
-    check(core.combine([100])[0] == core.VERDICT_MALICIOUS, "single malicious")
+    # A single malicious source is not enough evidence to convict anything.
+    check(core.combine([100])[0] == core.VERDICT_SUSPICIOUS,
+          "single malicious -> suspicious (needs corroboration)")
+    check(core.combine([100])[1] <= 50, "single malicious keeps low confidence")
     check(core.combine([100, 100])[0] == core.VERDICT_MALICIOUS, "two malicious")
+    check(core.combine([100, 100])[1] >= 75, "two malicious -> high confidence")
+    check(core.combine([100, 100, 100])[1] > core.combine([100, 100])[1],
+          "more corroboration, more confidence")
     check(core.combine([100, -100])[0] == core.VERDICT_UNKNOWN, "conflict -> unknown")
     check(core.combine([-100])[0] == core.VERDICT_KNOWN_GOOD, "known good")
     check(core.combine([-20])[0] == core.VERDICT_CLEAN, "clean")
     check(core.combine([])[0] == core.VERDICT_UNKNOWN, "empty -> unknown")
+    check(core.combine([60, 60])[0] == core.VERDICT_SUSPICIOUS,
+          "two suspicious never escalate to malicious")
+    check(core.combine([100])[1] < core.combine([100, 100])[1],
+          "corroboration beats a lone feed")
+
+
+def report_view() -> None:
+    print("\n[report]")
+    ind = core.parse_indicator(
+        "bdd1a33de78618d16ee4ce148b849932c05d0015491c34887846d431d29f308e")
+
+    # two independent feeds agree -> malicious, and the family is named
+    rep = core.Report(indicator=ind)
+    rep.results = [
+        core.SourceResult(source="malwarebazaar", status="found",
+                          verdict=core.VERDICT_MALICIOUS, note="Emotet",
+                          detail={"signature": "Emotet", "file_type": "exe"}),
+        core.SourceResult(source="urlhaus", status="found",
+                          verdict=core.VERDICT_MALICIOUS, note="payload",
+                          detail={"file_type": "exe"}),
+        core.SourceResult(source="circl", status="not_found"),
+        core.SourceResult(source="hybridanalysis", status="error"),
+    ]
+    check(rep.corroboration() == 2, f"corroboration counted ({rep.corroboration()})")
+    check(rep.verdict() == core.VERDICT_MALICIOUS, "two agreeing feeds -> malicious")
+    classes = {c["key"]: c for c in rep.evidence()}
+    check(classes["blocklist"]["hit"] == 2, "blocklist class counts 2 hits")
+    check(classes["blocklist"]["answered"] == 3,
+          "blocklist class counts every source that answered")
+    check("sandbox" not in classes, "errored source is not evidence")
+    check(rep.families() == ["Emotet"], f"families: {rep.families()}")
+    check("emotet" in rep.headline().lower(),
+          f"headline names the family: {rep.headline()}")
+
+    # one feed alone is a lead, and says so
+    lead = core.Report(indicator=ind)
+    lead.results = [core.SourceResult(source="malwarebazaar", status="found",
+                                      verdict=core.VERDICT_MALICIOUS)]
+    check(lead.verdict() == core.VERDICT_SUSPICIOUS, "lone feed -> suspicious")
+    check("1 source" in lead.headline(),
+          f"headline flags the lone source: {lead.headline()}")
+
+    # NSRL identity: a known Windows binary is named, not accused
+    good = core.Report(indicator=ind)
+    good.results = [core.SourceResult(
+        source="circl", status="found", verdict=core.VERDICT_KNOWN_GOOD,
+        note="cmd.exe",
+        detail={"FileName": "cmd.exe",
+                "ProductName": "Microsoft Windows Operating System",
+                "OpSystemName": "Windows", "FileSize": 311296})]
+    ident = good.file_identity()
+    check(ident.get("name") == "cmd.exe", f"file identity name ({ident})")
+    check(ident.get("size") == "304.0 KB", f"file size rendered ({ident.get('size')})")
+    check(good.verdict() == core.VERDICT_KNOWN_GOOD, "known good kept")
+    check("cmd.exe" in good.headline(),
+          f"known-good headline names the file: {good.headline()}")
+
+    payload = rep.to_dict()
+    for key in ("corroboration", "families", "evidence", "file_identity", "headline"):
+        check(key in payload, f"json has {key}")
 
 
 def live(skip: bool) -> None:
@@ -74,7 +140,10 @@ def live(skip: bool) -> None:
           f"in {rep.elapsed:.1f}s")
     for r in rep.results:
         print(f"    {r.source:<16} {r.status:<12} {r.verdict:<12} {r.note[:50]}")
-    check(rep.verdict() == core.VERDICT_MALICIOUS, "EICAR is malicious")
+    # With two or more keyed sources this is malicious; a keyless-only box may
+    # only reach suspicious, which is the honest answer for one feed.
+    check(rep.verdict() in (core.VERDICT_MALICIOUS, core.VERDICT_SUSPICIOUS),
+          f"EICAR flagged ({rep.verdict()}, {rep.corroboration()} source(s) agree)")
 
     rep2 = eng.lookup(eicar)
     cached = sum(1 for r in rep2.results if r.detail.get("_cached"))
@@ -99,5 +168,6 @@ def live(skip: bool) -> None:
 if __name__ == "__main__":
     parsing()
     verdicts()
+    report_view()
     live("--offline" in sys.argv)
     print("\nall checks passed")

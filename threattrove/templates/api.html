@@ -50,9 +50,17 @@ curl -s '{{ request.url_root }}api/v1/bulk/&lt;job_id&gt;' | jq .status</pre>
   <pre class="json">{
   "indicator": { "kind": "hash", "value": "44d88612…", "raw": "44d88612…", "hashes": {"md5": "…"} },
   "verdict": "malicious",          // malicious | suspicious | clean | known_good | unknown
-  "confidence": 100,
-  "headline": "2 source(s) flagged this as malicious",
+  "confidence": 75,
+  "headline": "Listed as malicious by 2 independent sources",
   "score": 200,
+  "corroboration": 2,
+  "families": ["Emotet"],
+  "evidence": [
+    { "key": "blocklist", "label": "Blocklists", "answered": 2, "hit": 2,
+      "sources": ["circl", "otx"] }
+  ],
+  "file_identity": { "name": "cmd.exe", "product": "Microsoft Windows",
+                     "size": "304.0 KB", "source": "circl" },
   "elapsed_seconds": 0.54,
   "sources_checked": 2,
   "results": [

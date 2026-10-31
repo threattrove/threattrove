@@ -22,7 +22,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
 
-VERSION = "2.0.1"
+VERSION = "2.1.0"
 
 DEFAULT_TIMEOUT = float(os.environ.get("TT_TIMEOUT", "20"))
 CACHE_TTL_SECONDS = int(os.environ.get("TT_CACHE_TTL", str(7 * 24 * 3600)))
@@ -71,21 +71,117 @@ VERDICT_LABEL = {
 #: statuses that count towards the aggregate verdict
 SCORED_STATUSES = {"found", "not_found", "matched", "no_match"}
 
+#: independent sources that must list an indicator as malicious before it is
+#: reported as malicious. A lone hit is a lead, not a conviction.
+MIN_CORROBORATION = 2
+
+#: confidence granted by N corroborating sources (5 or more -> MAX)
+CORROBORATION_CONFIDENCE = {1: 45, 2: 75, 3: 88, 4: 93}
+CORROBORATION_CONFIDENCE_MAX = 96
+CONFIDENCE_CAP = 98
+SUSPICIOUS_CONFIDENCE = 60
+
 
 def combine(weights: Sequence[int]) -> Tuple[str, int]:
-    """Combine per-source weights into (verdict, confidence)."""
+    """Combine per-source weights into (verdict, confidence).
+
+    Malicious is gated on corroboration: at least ``MIN_CORROBORATION``
+    independent sources must list the indicator as malicious. One feed alone is
+    reported as suspicious with low confidence, because a single hit is often a
+    stale entry, an over-broad feed, or a shared hosting address. Confidence is
+    a grade of agreement between sources, not a sum of points.
+    """
     if not weights:
         return VERDICT_UNKNOWN, 0
+
+    malicious = sum(1 for w in weights
+                    if w >= VERDICT_WEIGHT[VERDICT_MALICIOUS])
+    suspicious = sum(1 for w in weights
+                     if 0 < w < VERDICT_WEIGHT[VERDICT_MALICIOUS])
+    trusted = sum(1 for w in weights
+                  if w <= VERDICT_WEIGHT[VERDICT_KNOWN_GOOD])
+    benign = sum(1 for w in weights
+                 if VERDICT_WEIGHT[VERDICT_KNOWN_GOOD] < w < 0)
+
+    # A malware feed and a curated allowlist disagreeing is not evidence of
+    # anything in particular; refuse to guess instead of averaging them.
+    if malicious and trusted:
+        return VERDICT_UNKNOWN, 0
+
+    if malicious >= MIN_CORROBORATION:
+        base = CORROBORATION_CONFIDENCE.get(malicious,
+                                            CORROBORATION_CONFIDENCE_MAX)
+        return VERDICT_MALICIOUS, min(CONFIDENCE_CAP,
+                                      base + 5 * suspicious)
+
+    if malicious:
+        return VERDICT_SUSPICIOUS, min(CONFIDENCE_CAP,
+                                       CORROBORATION_CONFIDENCE[1]
+                                       + 5 * suspicious)
+
+    if suspicious:
+        return VERDICT_SUSPICIOUS, min(CONFIDENCE_CAP,
+                                       SUSPICIOUS_CONFIDENCE
+                                       + 15 * (suspicious - 1))
+
     score = sum(weights)
-    if score >= 100:
-        return VERDICT_MALICIOUS, min(100, score)
-    if score >= 40:
-        return VERDICT_SUSPICIOUS, min(99, score)
-    if score <= -100:
+    if trusted:
         return VERDICT_KNOWN_GOOD, min(100, abs(score))
-    if score <= -20:
+    if benign:
         return VERDICT_CLEAN, min(99, abs(score))
     return VERDICT_UNKNOWN, 0
+
+
+# --------------------------------------------------------------------------
+# Evidence classes
+# --------------------------------------------------------------------------
+
+#: (key, label, description, sources). Ordered from strongest evidence to
+#: weakest: a blocklist hit names this exact artifact, an engine verdict is an
+#: opinion about it, community intel is chatter about it, and reputation lists
+#: are usually about a host rather than a file.
+EVIDENCE_CLASSES: Tuple[Tuple[str, str, str, Tuple[str, ...]], ...] = (
+    ("blocklist", "Blocklists",
+     "Malware sample and payload feeds that list this exact indicator",
+     ("malwarebazaar", "urlhaus", "urlhaus_url", "threatfox", "malshare",
+      "circl", "local")),
+    ("sandbox", "Sandbox engines",
+     "Automated analysis engines that detonated or scanned the artifact",
+     ("virustotal", "virustotal_url", "virustotal_domain",
+      "hybridanalysis", "triage")),
+    ("community", "Community intel",
+     "Analyst pulses and public scan reports that mention the indicator",
+     ("otx", "otx_url", "otx_domain", "urlscan")),
+    ("reputation", "Reputation",
+     "Curated block/allow lists and site reputation services",
+     ("gsb", "phishtank")),
+)
+
+EVIDENCE_OTHER = ("other", "Other",
+                  "Other sources that returned data for this indicator")
+
+
+def evidence_class(source: str) -> Tuple[str, str, str]:
+    """Map a source name onto its (key, label, description) evidence class."""
+    for key, label, description, sources in EVIDENCE_CLASSES:
+        if source in sources:
+            return key, label, description
+    return EVIDENCE_OTHER
+
+
+def human_size(value: Any) -> str:
+    """Render a byte count as a short human string, or '' if it is not one."""
+    try:
+        size = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if size <= 0:
+        return ""
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return ""
 
 
 # --------------------------------------------------------------------------
@@ -309,21 +405,164 @@ class Report:
         return [r.source for r in self.results
                 if r.verdict in (VERDICT_MALICIOUS, VERDICT_SUSPICIOUS)]
 
+    def corroboration(self) -> int:
+        """How many independent sources list this indicator as malicious."""
+        return len({r.source for r in self.results
+                    if r.category == "reputation"
+                    and r.status in SCORED_STATUSES
+                    and r.verdict == VERDICT_MALICIOUS})
+
+    def evidence(self) -> List[Dict[str, Any]]:
+        """Group the sources that answered into evidence classes.
+
+        The point is to show *what kind* of evidence backs the verdict, and how
+        many sources inside each class agree, instead of one flat count.
+        """
+        classes = [tuple(c[:3]) for c in EVIDENCE_CLASSES] + [EVIDENCE_OTHER]
+        groups: Dict[str, Dict[str, Any]] = {}
+        for key, label, description in classes:
+            groups[key] = {"key": key, "label": label,
+                           "description": description,
+                           "sources": [], "answered": 0, "hit": 0}
+        for r in self.results:
+            if r.category != "reputation" or r.status not in SCORED_STATUSES:
+                continue
+            key = evidence_class(r.source)[0]
+            group = groups[key]
+            group["sources"].append(r.source)
+            group["answered"] += 1
+            if r.verdict in (VERDICT_MALICIOUS, VERDICT_SUSPICIOUS):
+                group["hit"] += 1
+        return [g for g in groups.values() if g["answered"]]
+
+    def families(self) -> List[str]:
+        """Malware family / signature names reported by malicious sources."""
+        names: List[str] = []
+        seen = set()
+        for r in self.results:
+            if r.verdict not in (VERDICT_MALICIOUS, VERDICT_SUSPICIOUS):
+                continue
+            detail = r.detail or {}
+            for key in ("signature", "malware", "threat_label", "family",
+                        "threat"):
+                value = detail.get(key)
+                if not isinstance(value, str):
+                    continue
+                label = value.strip()
+                if not label or label.lower() in seen:
+                    continue
+                seen.add(label.lower())
+                names.append(label)
+        return names[:4]
+
+    def file_identity(self) -> Dict[str, str]:
+        """Best-effort "what file is this" summary from sources that name it.
+
+        Without a filename database of our own, the name/product/platform
+        fields that NSRL (CIRCL) and VirusTotal already return are the only
+        way to answer "which executable is this hash?" -- so surface them
+        instead of hiding them in the raw detail blob.
+        """
+        ident: Dict[str, str] = {"name": "", "product": "", "platform": "",
+                                 "type": "", "size": "", "first_seen": "",
+                                 "source": ""}
+
+        def take(field: str, *values: Any) -> None:
+            if ident[field]:
+                return
+            for value in values:
+                if field == "size":
+                    text = human_size(value)
+                elif isinstance(value, str):
+                    text = value.strip()
+                else:
+                    text = ""
+                if text:
+                    ident[field] = text
+                    return
+
+        for r in self.results:
+            detail = r.detail or {}
+            if r.source == "circl":
+                take("name", detail.get("FileName"))
+                take("product", detail.get("ProductName"))
+                take("platform", detail.get("OpSystemName"))
+                take("size", detail.get("FileSize"))
+            elif r.source == "virustotal":
+                take("name", detail.get("meaningful_name"))
+                take("type", detail.get("type_description"))
+                take("size", detail.get("size"))
+                take("first_seen", detail.get("first_submission"))
+            elif r.source == "malwarebazaar":
+                take("type", detail.get("file_type"))
+                take("first_seen", detail.get("first_seen"))
+            elif r.source in ("urlhaus", "urlhaus_url"):
+                take("type", detail.get("file_type"))
+                take("first_seen", detail.get("firstseen"))
+            if ident["name"] and not ident["source"]:
+                ident["source"] = r.source
+        return {k: v for k, v in ident.items() if v}
+
+    def _conflict(self) -> bool:
+        """True when a malware feed and a curated allowlist both match."""
+        weights = self._weights()
+        return (any(w >= VERDICT_WEIGHT[VERDICT_MALICIOUS] for w in weights)
+                and any(w <= VERDICT_WEIGHT[VERDICT_KNOWN_GOOD]
+                        for w in weights))
+
     def headline(self) -> str:
-        """A VirusTotal-style one-line summary."""
+        """A one-line, calibrated summary of the evidence behind the verdict."""
+        verdict = self.verdict()
         det, tot = self.engine_ratio()
-        n = len(self.flagged_by())
-        if self.verdict() == VERDICT_MALICIOUS:
-            if tot:
-                return f"{det}/{tot} security vendors flagged this as malicious"
-            return f"Flagged as malicious by {n} security source(s)"
-        if self.verdict() == VERDICT_SUSPICIOUS:
-            return f"Flagged as suspicious by {max(n, 1)} source(s)"
-        if self.verdict() == VERDICT_KNOWN_GOOD:
-            return "This matches a known-good record"
-        if self.verdict() == VERDICT_CLEAN:
-            return "No security vendor flagged this"
-        return "No security vendor data is available for this indicator"
+        sources = self.corroboration()
+        families = self.families()
+        ident = self.file_identity()
+        name = ident.get("name", "")
+
+        if verdict == VERDICT_MALICIOUS:
+            if sources >= MIN_CORROBORATION:
+                text = f"Listed as malicious by {sources} independent sources"
+                if det and tot:
+                    text += f", and {det}/{tot} engines agree"
+            else:
+                text = f"{det}/{tot} engines flagged this as malicious"
+            if families:
+                text += f" ({families[0]})"
+            return text
+
+        if verdict == VERDICT_SUSPICIOUS:
+            if sources == 1:
+                who = next(iter({r.source for r in self.results
+                                 if r.verdict == VERDICT_MALICIOUS}), "")
+                where = f" ({who})" if who else ""
+                return (f"Only 1 source lists this as malicious{where} - "
+                        "a lead, not a conviction")
+            flagged = len({r.source for r in self.results
+                           if r.verdict == VERDICT_SUSPICIOUS})
+            if sources >= MIN_CORROBORATION or flagged:
+                return ("Sources disagree or only partially flag this - "
+                        f"{self.confidence()}% confidence")
+            return "Suspicious, but the evidence is thin"
+
+        if verdict == VERDICT_KNOWN_GOOD:
+            if name:
+                text = f"Known good: {name}"
+                if ident.get("product"):
+                    text += f" ({ident['product']})"
+                return text
+            return "Matches a known-good record"
+
+        if verdict == VERDICT_CLEAN:
+            if det == 0 and tot:
+                return f"0/{tot} engines flagged this and no feed lists it"
+            return "No source that answered flagged this"
+
+        if self._conflict():
+            return ("Sources disagree: a malware feed and an allowlist both "
+                    "match this indicator")
+        if name:
+            return f"No verdict for {name} - no source has data on it"
+        return "No source returned a usable verdict for this indicator"
 
     def to_dict(self, include_results: bool = True) -> Dict[str, Any]:
         d = {
@@ -332,6 +571,10 @@ class Report:
             "confidence": self.confidence(),
             "headline": self.headline(),
             "score": self.score(),
+            "corroboration": self.corroboration(),
+            "families": self.families(),
+            "evidence": self.evidence(),
+            "file_identity": self.file_identity(),
             "elapsed_seconds": round(self.elapsed, 2),
             "created": self.created,
             "sources_checked": len(self.reputation()),

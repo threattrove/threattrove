@@ -12,7 +12,7 @@ $ threattrove 44d88612fea8a8f36de82e1278abb02f
 ━━ 44d88612fea8a8f36de82e1278abb02f
 
   File hash
-  MALICIOUS    100% confidence    Flagged as malicious by 2 security source(s)
+  MALICIOUS    75% confidence    Listed as malicious by 2 independent sources
 
   SECURITY SOURCES
   ──────────────────────────────────────────────────────────────────────────
@@ -31,8 +31,9 @@ That's the EICAR test file, found by two keyless sources with no API key set.
 * **Keyless by default.** CIRCL hashlookup, AlienVault OTX, urlscan.io, crt.sh,
   DNS and RDAP answer without registration, so a fresh clone is useful in ~30s.
 * **One verdict, many voices.** Each source gets its own row with status, note
-  and (where it exists) an engine ratio; the verdict is a transparent score, not
-  a black box.
+  and (where it exists) an engine ratio; the verdict needs corroboration from two
+  independent sources before it says "malicious", and shows an evidence
+  breakdown rather than a single unexplained number.
 * **Built for bulk.** CSV/feed ingestion in the CLI and in the web UI, with
   SQLite-backed jobs you can poll and export.
 * **Own your data.** Everything — cache, bulk jobs, your own labels — lives in a
@@ -143,32 +144,58 @@ Raw bodies work too (`text/plain`, one indicator per line). Limits come from
 ## How a verdict is produced
 
 Each source returns `verdict`, `detections`/`total` (engines), `note` and a raw
-`detail`. Weights are additive:
+`detail`. Weights are only used for bookkeeping; the verdict itself is driven by
+**corroboration** — how many independent sources actually say malicious.
 
-| Condition | Points |
+| Condition | Verdict |
 | --- | --- |
-| Source says malicious, ≥5 engines involved | +100 |
-| Source says malicious (list membership, few engines) | +40…+100 |
-| Source says suspicious | +40 |
-| Source says known-good (NSRL, whitelist) | −100 |
-| Source says clean | −20 |
+| 2 or more sources say malicious | MALICIOUS |
+| 1 source says malicious (no allowlist conflict) | SUSPICIOUS |
+| Sources say suspicious, none say malicious | SUSPICIOUS |
+| A malware feed and a curated allowlist both match | UNKNOWN (refuse to guess) |
+| Source says known-good (NSRL, whitelist) | KNOWN GOOD |
+| Sources say clean | CLEAN |
+| Nothing answered | UNKNOWN |
 
-```
-score ≥ 100   → MALICIOUS
-score ≥ 40    → SUSPICIOUS
-score ≤ −100  → KNOWN GOOD
-score ≤ −20   → CLEAN
-otherwise     → UNKNOWN        (no data, or sources disagree)
-```
+Confidence is a grade of agreement, not a sum of points:
 
-`confidence = min(100, abs(score))`. Sources in the `intel` category (DNS, RDAP,
-crt.sh, reverse IP) enrich the report but never change the verdict. Engine
-ratios are only computed from sources that actually report engines — a urlscan
-"6987 scans" is a scan count, not a detection count, and is shown as `–`.
+| Corroborating sources | Confidence |
+| --- | --- |
+| 1 | 45 |
+| 2 | 75 |
+| 3 | 88 |
+| 4 | 93 |
+| 5+ | 96 |
+
+A source that also reports engines adds a small bonus, capped at 98. Why the
+floor exists: a lone feed hit is frequently a stale entry, an over-broad
+signature, or a shared-hosting address, and calling that "malicious" is how a
+lookup tool loses its users' trust. One hit is reported as a lead, with the
+name of the source that produced it.
+
+Every report also carries an **evidence breakdown** (`evidence` in the JSON,
+an evidence strip on the result page) that groups the sources that answered into
+four classes — blocklists, sandbox engines, community intel, reputation — and
+shows how many sources inside each class agree. That is the honest alternative
+to a vendor count: instead of "73 engines", you see "2/3 blocklists, 0/1 sandbox".
+
+Sources in the `intel` category (DNS, RDAP, crt.sh, reverse IP) enrich the
+report but never change the verdict. Engine ratios are only computed from
+sources that actually report engines — a urlscan "6987 scans" is a scan count,
+not a detection count, and is shown as `–`.
 
 Deliberate anti-noise choices: OTX pulses that carry `Whitelisted domain` or
-`Known False Positive` validation are downgraded to UNKNOWN; EICAR-style
-keyless hits are attributed to the *listing* source rather than multiplied.
+`Known False Positive` validation are downgraded to UNKNOWN; two "suspicious"
+sources never add up to "malicious".
+
+### What file is this hash?
+
+When a source names the file — NSRL/CIRCL `FileName`/`ProductName`/
+`OpSystemName`, VirusTotal `meaningful_name`/`type_description`, MalwareBazaar
+`file_type` — the name is lifted out of the raw detail blob and shown under the
+verdict (`file_identity` in the JSON). A known Windows binary therefore renders
+as `Known good: cmd.exe (Microsoft Windows Operating System)` rather than as an
+anonymous hash.
 
 ---
 
@@ -303,7 +330,7 @@ Dockerfile, docker-compose.yml
 ## Testing
 
 ```bash
-.venv/bin/python scripts/smoke.py --offline   # 13 parsing + 6 verdict checks
+.venv/bin/python scripts/smoke.py --offline   # 14 parsing + 11 verdict + 18 report checks
 .venv/bin/python scripts/smoke.py             # + live hash/URL/domain lookups
 ```
 
