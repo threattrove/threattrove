@@ -233,12 +233,18 @@ class URLhausPayload(Source):
     kinds = (KIND_HASH,)
 
     def lookup(self, ind: Indicator) -> SourceResult:
-        md5 = ind.hashes.get("md5")
-        if not md5:
-            return self.result(status="skipped", note="md5 required")
+        # URLhaus accepts either digest. Prefer sha256 because a pasted hash is
+        # almost always sha256 and no other digest can be derived from it.
+        sha256 = ind.hashes.get("sha256")
+        if sha256:
+            field, value = "sha256_hash", sha256
+        elif ind.hashes.get("md5"):
+            field, value = "md5_hash", ind.hashes["md5"]
+        else:
+            return self.result(status="skipped", note="sha256 or md5 required")
         r = self.session().post(
             "https://urlhaus-api.abuse.ch/v1/payload/",
-            data={"md5_hash": md5}, headers={"Auth-Key": self.key() or ""},
+            data={field: value}, headers={"Auth-Key": self.key() or ""},
             timeout=DEFAULT_TIMEOUT)
         if r.status_code in (401, 403):
             return self.result(status="unauthorized", note="invalid Auth-Key")
@@ -250,7 +256,7 @@ class URLhausPayload(Source):
         return self.result(
             status="found", verdict=VERDICT_MALICIOUS,
             note=_short(data.get("signature") or "payload seen in URLhaus", 60),
-            link=f"https://urlhaus.abuse.ch/browse.php?search={md5}",
+            link=f"https://urlhaus.abuse.ch/browse.php?search={value}",
             detail={"file_type": data.get("file_type"),
                     "signature": data.get("signature"),
                     "url_count": data.get("url_count"),
