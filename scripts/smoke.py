@@ -119,8 +119,49 @@ def report_view() -> None:
           f"known-good headline names the file: {good.headline()}")
 
     payload = rep.to_dict()
-    for key in ("corroboration", "families", "evidence", "file_identity", "headline"):
+    for key in ("corroboration", "direct_sources", "campaign_only", "families",
+                "evidence", "file_identity", "headline"):
         check(key in payload, f"json has {key}")
+
+    # Distribution feeds alone cannot convict: this is the authentic-PuTTY case,
+    # listed by URLhaus and named in OTX because attackers re-hosted it.
+    campaign = core.Report(indicator=ind)
+    campaign.results = [
+        core.SourceResult(source="urlhaus", status="found",
+                          verdict=core.VERDICT_MALICIOUS,
+                          note="payload seen in URLhaus"),
+        core.SourceResult(source="otx", status="found",
+                          verdict=core.VERDICT_MALICIOUS, note="5 pulse(s)"),
+        core.SourceResult(source="hybridanalysis", status="found",
+                          verdict=core.VERDICT_CLEAN, detections=0, total=2,
+                          note="0/2 scanner(s) flagged - putty.exe",
+                          detail={"engines": True, "file_name": "putty.exe"}),
+    ]
+    check(campaign.corroboration() == 2, "two distribution feeds agree")
+    check(campaign.verdict() == core.VERDICT_SUSPICIOUS,
+          f"campaign listing without a file look -> suspicious ({campaign.verdict()})")
+    check(campaign.campaign_only() is True, "campaign_only flagged")
+    check(campaign.confidence() <= 45,
+          f"campaign-only confidence capped ({campaign.confidence()})")
+    check("none examined the file" in campaign.headline(),
+          f"headline says nobody looked at the file: {campaign.headline()}")
+
+    # The same feeds plus one source that actually looked -> malicious again.
+    campaign.results.append(core.SourceResult(
+        source="malwarebazaar", status="found", verdict=core.VERDICT_MALICIOUS,
+        note="Emotet", detail={"signature": "Emotet"}))
+    check(campaign.verdict() == core.VERDICT_MALICIOUS,
+          "a direct determination restores the malicious verdict")
+
+    # A single partial flag is not a disagreement between sources.
+    partial = core.Report(indicator=ind)
+    partial.results = [core.SourceResult(source="otx", status="found",
+                                         verdict=core.VERDICT_SUSPICIOUS,
+                                         note="1 pulse(s)")]
+    check("Only 1 source flags this as suspicious" in partial.headline(),
+          f"single partial flag described honestly: {partial.headline()}")
+    check("disagree" not in partial.headline().lower(),
+          "no 'sources disagree' when only one source spoke")
 
 
 def sandbox_ha() -> None:

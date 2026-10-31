@@ -22,7 +22,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
 
-VERSION = "2.1.1"
+VERSION = "2.1.2"
 
 DEFAULT_TIMEOUT = float(os.environ.get("TT_TIMEOUT", "20"))
 CACHE_TTL_SECONDS = int(os.environ.get("TT_CACHE_TTL", str(7 * 24 * 3600)))
@@ -74,6 +74,18 @@ SCORED_STATUSES = {"found", "not_found", "matched", "no_match"}
 #: independent sources that must list an indicator as malicious before it is
 #: reported as malicious. A lone hit is a lead, not a conviction.
 MIN_CORROBORATION = 2
+
+#: Sources whose "malicious" verdict means the file itself was examined: a
+#: sample repository that has the artifact, an engine scan, a sandbox run, or a
+#: local analyst. Feeds that record where a copy was *served from* (URLhaus,
+#: ThreatFox) and analyst chatter (OTX) describe distribution, not the file, and
+#: routinely accuse genuine vendor software that attackers re-hosted. They can
+#: corroborate, but they cannot convict on their own.
+DIRECT_SOURCES = frozenset({"malwarebazaar", "virustotal", "hybridanalysis",
+                            "triage", "malshare", "local"})
+
+#: confidence ceiling for a malicious consensus that no source examined
+CAMPAIGN_ONLY_CONFIDENCE = 45
 
 #: confidence granted by N corroborating sources (5 or more -> MAX)
 CORROBORATION_CONFIDENCE = {1: 45, 2: 75, 3: 88, 4: 93}
@@ -377,10 +389,17 @@ class Report:
         return sum(self._weights())
 
     def verdict(self) -> str:
-        return combine(self._weights())[0]
+        """Aggregate verdict, requiring one direct look at the file to convict."""
+        verdict = combine(self._weights())[0]
+        if verdict == VERDICT_MALICIOUS and not self.direct_evidence():
+            return VERDICT_SUSPICIOUS
+        return verdict
 
     def confidence(self) -> int:
-        return combine(self._weights())[1]
+        verdict, confidence = combine(self._weights())
+        if verdict == VERDICT_MALICIOUS and not self.direct_evidence():
+            return min(confidence, CAMPAIGN_ONLY_CONFIDENCE)
+        return confidence
 
     # -- presentation helpers -------------------------------------------
     def reputation(self) -> List[SourceResult]:
@@ -411,6 +430,19 @@ class Report:
                     if r.category == "reputation"
                     and r.status in SCORED_STATUSES
                     and r.verdict == VERDICT_MALICIOUS})
+
+    def direct_evidence(self) -> List[str]:
+        """Sources that examined the file itself and called it malicious."""
+        return sorted({r.source for r in self.results
+                       if r.category == "reputation"
+                       and r.status in SCORED_STATUSES
+                       and r.verdict == VERDICT_MALICIOUS
+                       and r.source in DIRECT_SOURCES})
+
+    def campaign_only(self) -> bool:
+        """True when a malicious consensus rests purely on distribution data."""
+        return (self.corroboration() >= MIN_CORROBORATION
+                and not self.direct_evidence())
 
     def evidence(self) -> List[Dict[str, Any]]:
         """Group the sources that answered into evidence classes.
@@ -536,17 +568,30 @@ class Report:
             return text
 
         if verdict == VERDICT_SUSPICIOUS:
+            if self.campaign_only():
+                who = ", ".join(sorted({r.source for r in self.results
+                                        if r.verdict == VERDICT_MALICIOUS}))
+                text = (f"Listed in a malware campaign by {sources} sources "
+                        f"({who}) but none examined the file")
+                if tot and det == 0:
+                    text += f" - {tot} engines found nothing"
+                elif name:
+                    text += f" - {name}"
+                return text
             if sources == 1:
                 who = next(iter({r.source for r in self.results
                                  if r.verdict == VERDICT_MALICIOUS}), "")
                 where = f" ({who})" if who else ""
                 return (f"Only 1 source lists this as malicious{where} - "
                         "a lead, not a conviction")
-            flagged = len({r.source for r in self.results
-                           if r.verdict == VERDICT_SUSPICIOUS})
-            if sources >= MIN_CORROBORATION or flagged:
-                return ("Sources disagree or only partially flag this - "
-                        f"{self.confidence()}% confidence")
+            flagged = sorted({r.source for r in self.results
+                              if r.verdict == VERDICT_SUSPICIOUS})
+            if len(flagged) == 1:
+                return (f"Only 1 source flags this as suspicious "
+                        f"({flagged[0]}) - unconfirmed")
+            if flagged:
+                return (f"{len(flagged)} sources flag this as suspicious "
+                        f"({', '.join(flagged[:3])}) - no malware determination")
             return "Suspicious, but the evidence is thin"
 
         if verdict == VERDICT_KNOWN_GOOD:
@@ -577,6 +622,8 @@ class Report:
             "headline": self.headline(),
             "score": self.score(),
             "corroboration": self.corroboration(),
+            "direct_sources": self.direct_evidence(),
+            "campaign_only": self.campaign_only(),
             "families": self.families(),
             "evidence": self.evidence(),
             "file_identity": self.file_identity(),
