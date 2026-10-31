@@ -233,6 +233,8 @@ Copy `deploy/threattrove.env.example` and edit. The important ones:
 
 ## Deployment
 
+> The deploy files (deploy/, Dockerfile, docker-compose.yml) are not part of the PyPI package -- the wheel and sdist ship only the installation. Clone the repository to deploy.
+
 ### Docker
 
 ```bash
