@@ -22,7 +22,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
 
-VERSION = "2.1.7"
+VERSION = "2.1.8"
 
 DEFAULT_TIMEOUT = float(os.environ.get("TT_TIMEOUT", "20"))
 CACHE_TTL_SECONDS = int(os.environ.get("TT_CACHE_TTL", str(7 * 24 * 3600)))
@@ -618,6 +618,223 @@ class Report:
                 ident["source"] = r.source
         return {k: v for k, v in ident.items() if v}
 
+    # -- explanation ------------------------------------------------------
+    def _derived(self, add: Sequence[SourceResult] = (),
+                 drop: Sequence[str] = ()) -> "Report":
+        """A copy of this report with some sources dropped or a result added.
+
+        Exists so the "what would change it" lines can be produced by running
+        ``verdict`` and ``confidence`` over a hypothetical result set, instead
+        of restating what those rules are believed to do. If the rules change,
+        the explanation changes with them.
+        """
+        kept = [r for r in self.results if r.source not in drop]
+        return dataclasses.replace(self, results=kept + list(add))
+
+    @staticmethod
+    def _labels() -> Dict[str, str]:
+        """Pretty source names, read from the source registry."""
+        try:
+            from .sources import SOURCE_MAP
+        except Exception:                      # pragma: no cover
+            return {}
+        # Drop the operator suffix ("MalwareBazaar (abuse.ch)") so a pivot line
+        # stays readable inside a sentence.
+        return {name: str(getattr(src, "display", name)).split(" (")[0]
+                for name, src in SOURCE_MAP.items()}
+
+    def _untried(self) -> List[Tuple[str, str]]:
+        """Reputation sources that could still answer for this indicator.
+
+        Taken from the registry rather than a fixed list, so a domain lookup is
+        never told to consult a hash-only sample repository, and a deployment
+        without the key for a source is never given advice it cannot follow.
+        """
+        try:
+            from .sources import SOURCE_MAP
+        except Exception:                      # pragma: no cover
+            return [(n, n) for n in sorted(DIRECT_SOURCES)]
+        present = {r.source for r in self.results}
+        out: List[Tuple[str, str]] = []
+        for name, src in SOURCE_MAP.items():
+            if name in present or src.category != "reputation":
+                continue
+            if self.indicator.kind not in getattr(src, "kinds", ()):
+                continue
+            if not getattr(src, "available", lambda: True)():
+                continue
+            out.append((name, str(getattr(src, "display", name)).split(" (")[0]))
+        out.sort(key=lambda pair: (pair[0] not in DIRECT_SOURCES, pair[0]))
+        return out
+
+    def decision(self) -> Dict[str, Any]:
+        """The argument behind the verdict, and what would overturn it.
+
+        Three parts: the evidence classes that actually carried weight, the
+        counterfactuals that would flip the result, and any structural caveat
+        (distribution-only evidence, an engine sweep that found nothing, the
+        operator's own corpus deciding it).
+        """
+        verdict = self.verdict()
+        confidence = self.confidence()
+
+        classes = [tuple(c[:3]) for c in EVIDENCE_CLASSES] + [EVIDENCE_OTHER]
+        rows: List[Dict[str, Any]] = []
+        for key, label, description in classes:
+            members = [r for r in self.results
+                       if r.category == "reputation"
+                       and r.status in SCORED_STATUSES
+                       and evidence_class(r.source)[0] == key]
+            if not members:
+                continue
+            weight = sum(VERDICT_WEIGHT.get(r.verdict, 0) for r in members)
+            flagged = sum(1 for r in members
+                          if r.verdict in (VERDICT_MALICIOUS,
+                                           VERDICT_SUSPICIOUS))
+            rows.append({
+                "key": key,
+                "label": label,
+                "description": description,
+                "answered": len(members),
+                "flagged": flagged,
+                "weight": weight,
+                "verdicts": [{"name": r.source, "verdict": r.verdict}
+                             for r in members],
+            })
+
+        # What carried the verdict comes first; classes that abstained last.
+        rows.sort(key=lambda row: (-row["flagged"], -abs(row["weight"]),
+                                   row["label"]))
+        peak = max((abs(row["weight"]) for row in rows), default=0) or 1
+        for row in rows:
+            row["width"] = max(3, round(100 * abs(row["weight"]) / peak))
+            row["tone"] = ("bad" if row["weight"] > 0
+                           else "good" if row["weight"] < 0 else "muted")
+
+        pivots: List[Dict[str, Any]] = []
+        labels = self._labels()
+
+        # Dropping a source that voted malicious shows what the verdict leans on.
+        losses: List[Dict[str, Any]] = []
+        voters = sorted({r.source for r in self.results
+                         if r.category == "reputation"
+                         and r.status in SCORED_STATUSES
+                         and r.verdict == VERDICT_MALICIOUS
+                         and r.source != "local"})
+        for src in voters:
+            hyp = self._derived(drop=[src])
+            hv, hc = hyp.verdict(), hyp.confidence()
+            # A source that was holding the verdict up is worth naming even
+            # when the verdict survives it: the confidence it was buying is
+            # the part of the argument a reader cannot see.
+            if hv == verdict and confidence - hc < 5:
+                continue
+            losses.append({"kind": "without", "source": src,
+                           "label": f"If {labels.get(src, src)} had missed it",
+                           "verdict": hv, "confidence": hc,
+                           "changed": hv != verdict})
+        losses.sort(key=lambda p: (not p["changed"], p["confidence"]))
+        # Two feeds that prop the verdict up identically teach one lesson, so
+        # they share a line: "If X or Y had missed it".
+        grouped: List[Dict[str, Any]] = []
+        index: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+        for item in losses:
+            key = (item["changed"], item["verdict"], item["confidence"])
+            if key in index:
+                slot = index[key]
+                if len(slot["names"]) < 2:
+                    slot["names"].append(item["label"])
+                continue
+            slot = dict(item, names=[item["label"]])
+            index[key] = slot
+            grouped.append(slot)
+        for slot in grouped[:2]:
+            joined = " or ".join(n[len("If "):-len(" had missed it")]
+                               for n in slot["names"])
+            pivots.append({"kind": slot["kind"], "source": slot["source"],
+                           "label": f"If {joined} had missed it",
+                           "verdict": slot["verdict"],
+                           "confidence": slot["confidence"]})
+
+        # What would raise it: one more source agreeing on the indicator.
+        if verdict in (VERDICT_SUSPICIOUS, VERDICT_UNKNOWN, VERDICT_CLEAN):
+            best: Optional[Tuple[str, str, int]] = None
+            for cand, display in self._untried()[:14]:
+                hyp = self._derived(add=[SourceResult(
+                    source=cand, status="found", category="reputation",
+                    verdict=VERDICT_MALICIOUS, note="hypothetical")])
+                hv, hc = hyp.verdict(), hyp.confidence()
+                if hv == VERDICT_MALICIOUS and (best is None or hc > best[2]):
+                    best = (cand, display, hc)
+            if best is not None:
+                pivots.append({"kind": "with", "source": best[0],
+                               "label": f"If {best[1]} flagged it too",
+                               "verdict": VERDICT_MALICIOUS,
+                               "confidence": best[2]})
+
+        # The operator's own corpus outranks every feed; show what that does.
+        has_local = any(r.source == "local" for r in self.results)
+        if not has_local and verdict in (VERDICT_MALICIOUS, VERDICT_SUSPICIOUS):
+            hyp = self._derived(add=[SourceResult(
+                source="local", status="found", category="reputation",
+                verdict=VERDICT_CLEAN, note="allowlisted")])
+            hv, hc = hyp.verdict(), hyp.confidence()
+            if hv != verdict:
+                pivots.append({"kind": "own", "source": "local",
+                               "label": "If you allowlist it",
+                               "verdict": hv, "confidence": hc})
+
+        insights: List[str] = []
+        if (verdict == VERDICT_MALICIOUS and len(voters) > 1
+                and not any(p["kind"] == "without" for p in pivots)):
+            insights.append(f"No single source carries this: removing any one of "
+                            f"the {len(voters)} would still convict.")
+        direct = self.direct_evidence()
+        if verdict == VERDICT_MALICIOUS and not direct:
+            insights.append("No source examined the file itself; this rests on "
+                            "where it was seen, not what it contains.")
+        elif len(direct) == 1 and direct[0] != "local":
+            insights.append(f"Only {labels.get(direct[0], direct[0])} examined "
+                            "the file itself; the other sources know where it "
+                            "was seen.")
+        if verdict in (VERDICT_SUSPICIOUS, VERDICT_MALICIOUS) and self.engine_cleared():
+            insights.append("The engines found nothing. The flags are "
+                            "heuristic, which is the usual false-positive pair.")
+        if (self.trusted_determination()
+                and self.corroboration() < MIN_CORROBORATION):
+            insights.append("Your local corpus is what makes this malicious; "
+                            "no second source is required.")
+        if self._conflict():
+            insights.append("A feed and your allowlist both match this, so "
+                            "ThreatTrove declines to average them.")
+        if self.campaign_only() and verdict == VERDICT_SUSPICIOUS:
+            insights.append("Nothing looked at the indicator itself, so "
+                            "agreeing feeds remain a lead, not a conviction.")
+
+        # Only classes that carried a malicious vote count toward the breadth
+        # claim; a class that merely abstained or hedged did not agree to it.
+        classes_hit = len({row["key"] for row in rows
+                           if any(v["verdict"] == VERDICT_MALICIOUS
+                                  for v in row["verdicts"])})
+        summary = {
+            VERDICT_MALICIOUS: (
+                f"{self.corroboration()} sources across {classes_hit} evidence "
+                f"class{'' if classes_hit == 1 else 'es'} agree it is malicious"
+                if classes_hit else "Independent sources agree it is malicious"),
+            VERDICT_SUSPICIOUS: "Flagged, but not enough to convict",
+            VERDICT_CLEAN: "Nothing that answered found a problem",
+            VERDICT_KNOWN_GOOD: "Matches a known-good record",
+            VERDICT_UNKNOWN: "No source that answered could decide it",
+        }.get(verdict, "No usable verdict")
+        if (self.trusted_determination()
+                and self.corroboration() < MIN_CORROBORATION):
+            summary = ("Your own blocklist decides this on its own, without "
+                       "asking another source to agree")
+
+        return {"verdict": verdict, "confidence": confidence,
+                "summary": summary, "rows": rows, "pivots": pivots,
+                "insights": insights[:2]}
+
     def _conflict(self) -> bool:
         """True when a malware feed and a curated allowlist both match."""
         weights = self._weights()
@@ -721,6 +938,7 @@ class Report:
             "engine_cleared": self.engine_cleared(),
             "families": self.families(),
             "evidence": self.evidence(),
+            "decision": self.decision(),
             "file_identity": self.file_identity(),
             "elapsed_seconds": round(self.elapsed, 2),
             "created": self.created,

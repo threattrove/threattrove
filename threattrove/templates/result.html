@@ -46,18 +46,6 @@
   {% endif %}
 </div>
 
-{% set ev = report.evidence or [] %}
-{% if ev %}
-<div class="evidence-strip">
-  <span class="ev-label">Evidence</span>
-  {% for evc in ev %}
-  <span class="ev {{ evc.key }}{% if evc.hit %} hit{% endif %}" title="{{ evc.description }} - {{ evc.sources|join(', ') }}">
-    {{ evc.label }}<b class="ev-count">{{ evc.hit }}/{{ evc.answered }}</b>
-  </span>
-  {% endfor %}
-</div>
-{% endif %}
-
 {% set ident = report.file_identity or {} %}
 {% if ident.name %}
 <div class="identity">
@@ -68,6 +56,50 @@
   {% if ident.size %}<span class="ident-meta">{{ ident.size }}</span>{% endif %}
   {% if ident.first_seen %}<span class="ident-meta">first seen {{ ident.first_seen }}</span>{% endif %}
   <span class="note">named by {{ ident.source }}</span>
+</div>
+{% endif %}
+
+{% set dec = report.decision or {} %}
+{% if dec.get('rows') %}
+<div class="card decision" style="margin-top:22px">
+  <h2>What decided this</h2>
+  <p class="dec-lead">{{ dec.summary }}</p>
+
+  <div class="dec-rows">
+  {% for row in dec.get('rows', []) %}
+    <div class="dec-row">
+      <div class="dec-row-head">
+        <span class="dec-name">{{ row.label }}</span>
+        <span class="dec-count" title="{{ row.description }}">{{ row.flagged }}/{{ row.answered }} flagged</span>
+      </div>
+      <div class="dec-bar"><span class="dec-fill {{ row.tone }}" style="width:{{ row.width }}%"></span></div>
+      <div class="dec-src">
+        {% for vr in row.verdicts %}
+        <span class="pill mini {{ vr.verdict }}" title="{{ verdict_label.get(vr.verdict, vr.verdict) }}">{{ vr.name }}</span>
+        {% endfor %}
+      </div>
+    </div>
+  {% endfor %}
+  </div>
+
+  {% if dec.get('pivots') %}
+  <div class="dec-pivots">
+    <span class="dec-label">What would change it</span>
+    {% for p in dec.get('pivots', []) %}
+    <div class="dec-pivot">
+      <span class="dec-pivot-label">{{ p.label }}</span>
+      <span class="pill mini {{ p.verdict }}">{{ verdict_label.get(p.verdict, p.verdict) }}</span>
+      <span class="ratio">{{ p.confidence }}%</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if dec.get('insights') %}
+  <ul class="dec-insights">
+    {% for i in dec.get('insights', []) %}<li>{{ i }}</li>{% endfor %}
+  </ul>
+  {% endif %}
 </div>
 {% endif %}
 

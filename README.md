@@ -213,11 +213,12 @@ third-party feed's guess, so it convicts without waiting for a second source and
 reads `Listed in your local blocklist`. An allowlist row still outranks a feed
 hit, and a local row never overrides a conflicting allowlist into MALICIOUS.
 
-Every report also carries an **evidence breakdown** (`evidence` in the JSON,
-an evidence strip on the result page) that groups the sources that answered into
-four classes — blocklists, sandbox engines, community intel, reputation — and
-shows how many sources inside each class agree. That is the honest alternative
-to a vendor count: instead of "73 engines", you see "2/3 blocklists, 0/1 sandbox".
+Every report also carries an **evidence breakdown** (`evidence` in the JSON)
+that groups the sources that answered into four classes — blocklists, sandbox
+engines, community intel, reputation — and shows how many sources inside each
+class agree. That is the honest alternative to a vendor count: instead of "73
+engines", you see "2/3 blocklists, 0/1 sandbox". The result page draws it as
+the **What decided this** panel described below.
 
 Sources in the `intel` category (DNS, RDAP, crt.sh, reverse IP) enrich the
 report but never change the verdict. Engine ratios are only computed from
@@ -234,6 +235,44 @@ rather than a family (`malware`, `trojan`, `generic`, `heur`, …) is neither us
 to convict a file nor shown in the headline. Hybrid Analysis fills `vx_family`
 with words like `Malware` on files it merely disliked — a popular 7-Zip binary
 carries that tag — so a category word is not a determination.
+
+### What decided this
+
+A vendor count tells you how many engines disliked a file. It does not tell you
+why this instance reached the verdict it did, or what would have changed it. So
+every result page carries a **What decided this** panel (`decision` in the JSON)
+with three parts.
+
+*Weights per evidence class.* Each class that answered gets a bar showing the
+net weight it contributed (blocklists, sandbox engines, community intel,
+reputation), the sources inside it, and how many of them flagged the indicator.
+The class that carried the verdict sits at the top; a class that answered and
+abstained still appears, drawn short and grey, because "this feed looked and
+found nothing" is part of the argument.
+
+*Counterfactuals.* Each line re-runs the real verdict rules over a hypothetical
+result set and prints what the answer would have been:
+
+```
+If MalwareBazaar or URLhaus payload had missed it   ->  SUSPICIOUS  45%
+If MalShare flagged it too                          ->  MALICIOUS   88%
+If you allowlist it                                 ->  KNOWN GOOD  100%
+```
+
+None of that is templated prose. `Report.decision()` calls `verdict()` and
+`confidence()` on a copy of the report with a source removed or added
+(`dataclasses.replace`), so if the conviction rules change, the promises in this
+panel change with them — including the case where the answer is "nothing would
+change it", in which case no line is printed. Sources that could raise the
+verdict are taken from the live registry, filtered to the indicator type and to
+the ones this deployment can actually query, so a domain is never told to
+consult a hash-only sample repository and a self-hosted install without a
+VirusTotal key is never given advice it cannot follow.
+
+*Caveats.* Up to two structural notes: nobody examined the file itself, the
+engines cleared it while a heuristic kept flagging it, your own corpus is what
+made it malicious, or a feed and an allowlist both match and the tool refuses to
+average them.
 
 ### What file is this hash?
 

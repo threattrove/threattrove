@@ -164,6 +164,108 @@ def report_view() -> None:
           "no 'sources disagree' when only one source spoke")
 
 
+def decision_view() -> None:
+    """The "what decided this" panel: weights, counterfactuals, caveats."""
+    print("\n[decision]")
+    ind = core.parse_indicator(
+        "275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f")
+    mb = core.SourceResult(source="malwarebazaar", status="found",
+                           verdict=core.VERDICT_MALICIOUS, note="EICAR")
+    uh = core.SourceResult(source="urlhaus", status="found",
+                           verdict=core.VERDICT_MALICIOUS)
+    vt = core.SourceResult(source="virustotal", status="found",
+                           verdict=core.VERDICT_MALICIOUS, detections=58,
+                           total=72, detail={"engines": True})
+
+    rep = core.Report(indicator=ind)
+    rep.results = [mb, uh, vt,
+                   core.SourceResult(source="circl", status="not_found"),
+                   core.SourceResult(source="dns", status="found",
+                                     verdict=core.VERDICT_UNKNOWN,
+                                     category="intel")]
+    dec = rep.decision()
+    check(dec["verdict"] == rep.verdict() and
+          dec["confidence"] == rep.confidence(),
+          "panel repeats the aggregate verdict and confidence")
+    check([r["label"] for r in dec["rows"]][0] == "Blocklists",
+          f"heaviest evidence class first ({[r['label'] for r in dec['rows']]})")
+    check(dec["rows"][0]["width"] == 100, "leading bar is drawn full width")
+    check(all(0 < row["width"] <= 100 for row in dec["rows"]),
+          "every bar stays inside its track")
+    check(dec["rows"][0]["tone"] == "bad", "malicious weight renders hot")
+    check(all(row["key"] != "other" for row in dec["rows"]),
+          "intel rows never count as votes")
+    # The lead must say how wide the agreement is, not just how many sources:
+    # three sources spread over two classes is a different claim from three
+    # blocklists echoing one another.
+    check(dec["summary"] ==
+          "3 sources across 2 evidence classes agree it is malicious",
+          f"lead quantifies breadth, not just the count ({dec['summary']})")
+
+    # Two feeds are a conviction on their own; losing either must be modelled as
+    # a downgrade, and that number has to come from the real verdict rules.
+    pair = core.Report(indicator=ind)
+    pair.results = [mb, uh]
+    check(pair.verdict() == core.VERDICT_MALICIOUS, "two feeds convict")
+    piv = pair.decision()["pivots"]
+    check(bool(piv) and piv[0]["verdict"] == core.VERDICT_SUSPICIOUS,
+          f"losing one of two feeds is predicted as a lead ({piv})")
+    check(piv[0]["confidence"] < pair.confidence(),
+          "the predicted confidence is lower than today's")
+    pair_dec = pair.decision()
+    check("2 sources across 1 evidence class " in pair_dec["summary"],
+          f"two feeds in one class read as narrow ({pair_dec['summary']})")
+    check("classess" not in pair_dec["summary"], "singular plural is spelled")
+
+    # PuTTY: distribution feeds plus a clean engine sweep stay a lead, and the
+    # panel says why instead of pretending the feeds disagreed.
+    putty = core.Report(indicator=ind)
+    putty.results = [
+        core.SourceResult(source="urlhaus", status="found",
+                          verdict=core.VERDICT_MALICIOUS),
+        core.SourceResult(source="otx", status="found",
+                          verdict=core.VERDICT_MALICIOUS, note="5 pulse(s)"),
+        core.SourceResult(source="hybridanalysis", status="found",
+                          verdict=core.VERDICT_CLEAN, detections=0, total=2,
+                          detail={"engines": True}),
+    ]
+    putty_dec = putty.decision()
+    check(any("engines found nothing" in i for i in putty_dec["insights"]),
+          f"panel flags the heuristic-only suspicion ({putty_dec['insights']})")
+    check(any("lead, not a conviction" in i for i in putty_dec["insights"]),
+          "panel says agreeing feeds are still a lead")
+    clean_row = [r for r in putty_dec["rows"] if r["key"] == "sandbox"][0]
+    check(clean_row["tone"] == "good" and clean_row["flagged"] == 0,
+          "a clean engine sweep is drawn as counter-evidence")
+
+    # The operator's own corpus does not need to borrow credibility.
+    mine = core.Report(indicator=ind)
+    mine.results = [core.SourceResult(source="local", status="found",
+                                      verdict=core.VERDICT_MALICIOUS,
+                                      note="block")]
+    mine_dec = mine.decision()
+    check("blocklist decides this on its own" in mine_dec["summary"],
+          f"local verdict explained as a first-hand decision ({mine_dec['summary']})")
+    check("1 independent sources" not in mine_dec["summary"],
+          "no broken plural in the local summary")
+
+    # A clean report must not borrow the false-positive caveat.
+    quiet = core.Report(indicator=ind)
+    quiet.results = [
+        core.SourceResult(source="hybridanalysis", status="found",
+                          verdict=core.VERDICT_CLEAN, detections=0, total=2,
+                          detail={"engines": True}),
+        core.SourceResult(source="circl", status="not_found"),
+    ]
+    quiet_dec = quiet.decision()
+    check(not any("false-positive" in i for i in quiet_dec["insights"]),
+          f"no false-positive caveat on a clean result ({quiet_dec['insights']})")
+
+    payload = rep.to_dict()
+    check(isinstance(payload.get("decision"), dict), "decision shipped in the JSON")
+    check(payload["decision"]["rows"] == dec["rows"], "JSON rows match the panel")
+
+
 def sandbox_ha() -> None:
     """Hybrid Analysis verdict logic, driven by recorded API shapes."""
     print("\n[sandbox]")
@@ -610,6 +712,7 @@ if __name__ == "__main__":
     parsing()
     verdicts()
     report_view()
+    decision_view()
     sandbox_ha()
     engine_clearance()
     family_labels()
