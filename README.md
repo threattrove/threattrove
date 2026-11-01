@@ -225,6 +225,15 @@ report but never change the verdict. Engine ratios are only computed from
 sources that actually report engines — a urlscan "6987 scans" is a scan count,
 not a detection count, and is shown as `–`.
 
+**Engine floor**: a VirusTotal-style sweep only makes a call when at least three
+engines agree *and* at least 3% of the engines that ran, because one vendor out
+of ninety is noise rather than a determination. `8.8.8.8` carries a single flag
+out of 92 engines, so it reads `1/92 engines flagged, below the 3 needed to call
+it` and contributes no verdict instead of arriving as SUSPICIOUS — the raw ratio
+is still shown, the sweep simply does not speak for it. A sub-floor flag also no
+longer blocks engine clearance, so one noisy vendor cannot keep a heuristic
+alarm alive.
+
 Deliberate anti-noise choices: OTX pulses that carry `Whitelisted domain` or
 `Known False Positive` validation are downgraded to UNKNOWN, and a pulse whose
 tags say it is not a threat (`no problems`, `false positive`, `benign`, …) is

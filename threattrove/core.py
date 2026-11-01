@@ -22,7 +22,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
 
-VERSION = "2.1.8"
+VERSION = "2.1.9"
 
 DEFAULT_TIMEOUT = float(os.environ.get("TT_TIMEOUT", "20"))
 CACHE_TTL_SECONDS = int(os.environ.get("TT_CACHE_TTL", str(7 * 24 * 3600)))
@@ -515,7 +515,13 @@ class Report:
                  if r.source in ENGINE_SOURCES
                  and r.status in SCORED_STATUSES
                  and r.total and (r.detail or {}).get("engines")]
-        if not scans or any(r.detections for r in scans):
+        if not scans:
+            return False
+        # A lone vendor flagging a file out of ninety is noise, not a detection,
+        # and must not stop the rest of the sweep from clearing the file.
+        noisy = any(r.detections and not (r.detail or {}).get("low_signal")
+                    for r in scans)
+        if noisy:
             return False
         return sum(r.total for r in scans) >= ENGINE_CLEARANCE_MIN
 

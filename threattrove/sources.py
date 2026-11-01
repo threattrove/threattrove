@@ -310,6 +310,7 @@ class VirusTotalFile(Source):
     env_key = "VT_API_KEY"
     homepage = "https://www.virustotal.com/"
     kinds = (KIND_HASH,)
+    logic_version = 2       # 2.1.9: a stray engine flag is not a verdict
 
     def lookup(self, ind: Indicator) -> SourceResult:
         h = ind.preferred_hash()
@@ -744,6 +745,7 @@ class VirusTotalUrl(Source):
     env_key = "VT_API_KEY"
     homepage = "https://www.virustotal.com/"
     kinds = (KIND_URL,)
+    logic_version = 2       # 2.1.9: a stray engine flag is not a verdict
 
     def lookup(self, ind: Indicator) -> SourceResult:
         url_id = base64.urlsafe_b64encode(
@@ -875,6 +877,7 @@ class VirusTotalDomain(Source):
     env_key = "VT_API_KEY"
     homepage = "https://www.virustotal.com/"
     kinds = (KIND_DOMAIN, KIND_IP)
+    logic_version = 2       # 2.1.9: a stray engine flag is not a verdict
 
     def lookup(self, ind: Indicator) -> SourceResult:
         path = "ip_addresses" if ind.kind == KIND_IP else "domains"
@@ -1095,6 +1098,22 @@ def _vcard_name(entity: Dict[str, Any]) -> str:
     return ""
 
 
+#: A VirusTotal-style sweep only makes a call when enough engines agree.
+#:
+#: ``8.8.8.8`` -- close to the first thing anybody pastes in -- carries a single
+#: flag out of 92 engines on VirusTotal, and every public IP has a vendor or two
+#: that dislikes it. Reading that as a verdict is how a reputation service loses
+#: its credibility. Below this floor the raw ratio is still reported, but the
+#: source makes no call, so one noisy engine cannot decide a public verdict.
+VT_MIN_ENGINES = 3
+VT_MIN_SHARE = 0.03
+
+
+def _vt_floor(total: int) -> int:
+    """Fewest flagging engines needed to call a verdict out of ``total``."""
+    return max(VT_MIN_ENGINES, int(round(total * VT_MIN_SHARE)))
+
+
 def _vt_parse(source: Source, r: requests.Response, file_hash: str = "",
                url_value: str = "", vt_kind: str = "url") -> SourceResult:
     """Shared parser for every VirusTotal object response."""
@@ -1142,11 +1161,23 @@ def _vt_parse(source: Source, r: requests.Response, file_hash: str = "",
                        "last_analysis_date": attr.get("last_analysis_date")})
         link = f"https://www.virustotal.com/gui/{vt_kind}/{url_value}"
 
-    if mal > 0:
-        verdict = VERDICT_MALICIOUS if mal >= 3 else VERDICT_SUSPICIOUS
-        note = f"{mal}/{total} engines flagged"
-    elif susp > 0:
+    floor = _vt_floor(total)
+    if not total:
+        verdict, note = VERDICT_UNKNOWN, "no engine results yet"
+    elif mal >= floor:
+        verdict, note = VERDICT_MALICIOUS, f"{mal}/{total} engines flagged"
+    elif susp >= floor:
         verdict, note = VERDICT_SUSPICIOUS, f"{susp}/{total} suspicious"
+    elif mal or susp:
+        # Some vendors dislike it, but far too few to speak for the sweep.
+        verdict = VERDICT_UNKNOWN
+        detail["low_signal"] = True
+        if mal:
+            note = (f"{mal}/{total} engines flagged, below the "
+                    f"{floor} needed to call it")
+        else:
+            note = (f"{susp}/{total} suspicious, below the "
+                    f"{floor} needed to call it")
     else:
         verdict, note = VERDICT_CLEAN, f"0/{total} engines"
     return source.result(status="found", verdict=verdict, detections=mal,
