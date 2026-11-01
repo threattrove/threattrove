@@ -200,7 +200,11 @@ not a detection count, and is shown as `–`.
 
 Deliberate anti-noise choices: OTX pulses that carry `Whitelisted domain` or
 `Known False Positive` validation are downgraded to UNKNOWN; two "suspicious"
-sources never add up to "malicious".
+sources never add up to "malicious"; and a family label that names a category
+rather than a family (`malware`, `trojan`, `generic`, `heur`, …) is neither used
+to convict a file nor shown in the headline. Hybrid Analysis fills `vx_family`
+with words like `Malware` on files it merely disliked — a popular 7-Zip binary
+carries that tag — so a category word is not a determination.
 
 ### What file is this hash?
 

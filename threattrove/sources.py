@@ -284,6 +284,28 @@ HA_USABLE_STATES = {"malicious", "suspicious", "clean", "no specific threat",
                     "unknown", "whitelisted", "no threat"}
 HA_FLAGGED_STATES = {"malicious", "suspicious"}
 
+#: ``vx_family`` values that name a category rather than a family. Hybrid
+#: Analysis fills this field with words like "Malware" on files it merely
+#: disliked -- a popular 7-Zip build is tagged that way after a single engine
+#: flagged it -- so these are not a determination and are not shown as a family
+#: name.
+HA_GENERIC_FAMILIES = frozenset({
+    "malware", "malicious", "virus", "trojan", "worm", "backdoor",
+    "dropper", "downloader", "ransomware", "stealer", "infostealer",
+    "spyware", "adware", "pup", "pua", "riskware", "rootkit", "keylogger",
+    "miner", "coinminer", "exploit", "phishing", "crimeware", "hacktool",
+    "generic", "heuristic", "heur", "unknown", "unclassified", "other",
+    "none", "n/a", "na", "bad",
+})
+
+
+def _meaningful_family(value: str) -> bool:
+    """True when a family string names something more specific than a category."""
+    name = (value or "").strip()
+    if len(name) < 3 or not any(c.isalpha() for c in name):
+        return False
+    return name.lower().strip(".! ") not in HA_GENERIC_FAMILIES
+
 
 class HybridAnalysis(Source):
     """Falcon Sandbox / Hybrid Analysis.
@@ -389,7 +411,8 @@ class HybridAnalysis(Source):
         flagged = sorted(k for k, v in usable.items()
                          if (v.get("status") or "").lower() in HA_FLAGGED_STATES)
         total = len(usable)
-        family = (entry.get("vx_family") or "").strip()
+        family_raw = (entry.get("vx_family") or "").strip()
+        family = family_raw if _meaningful_family(family_raw) else ""
         verdict_raw = (entry.get("verdict") or "").strip().lower()
         score = entry.get("threat_score")
         whitelisted = bool(entry.get("whitelisted"))
@@ -403,6 +426,7 @@ class HybridAnalysis(Source):
             "verdict": entry.get("verdict"),
             "threat_score": score,
             "family": family or None,
+            "family_raw": family_raw or None,
             "file_name": entry.get("last_file_name"),
             "type": entry.get("type"),
             "size": entry.get("size"),

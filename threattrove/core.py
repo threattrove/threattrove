@@ -22,7 +22,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
 
-VERSION = "2.1.3"
+VERSION = "2.1.4"
 
 DEFAULT_TIMEOUT = float(os.environ.get("TT_TIMEOUT", "20"))
 CACHE_TTL_SECONDS = int(os.environ.get("TT_CACHE_TTL", str(7 * 24 * 3600)))
@@ -83,6 +83,17 @@ MIN_CORROBORATION = 2
 #: corroborate, but they cannot convict on their own.
 DIRECT_SOURCES = frozenset({"malwarebazaar", "virustotal", "hybridanalysis",
                             "triage", "malshare", "local"})
+
+#: family labels that name a category rather than a specific family. They are
+#: dropped from ``families()`` so a headline never reads "(Malware)".
+GENERIC_FAMILY_LABELS = frozenset({
+    "malware", "malicious", "virus", "trojan", "worm", "backdoor",
+    "dropper", "downloader", "ransomware", "stealer", "infostealer",
+    "spyware", "adware", "pup", "pua", "riskware", "rootkit", "keylogger",
+    "miner", "coinminer", "exploit", "phishing", "crimeware", "hacktool",
+    "generic", "heuristic", "heur", "unknown", "unclassified", "other",
+    "none", "n/a", "na", "bad",
+})
 
 #: confidence ceiling for a malicious consensus that no source examined
 CAMPAIGN_ONLY_CONFIDENCE = 45
@@ -526,9 +537,12 @@ class Report:
                 if not isinstance(value, str):
                     continue
                 label = value.strip()
-                if not label or label.lower() in seen:
+                key = label.lower().strip(".! ")
+                if not label or key in seen or key in GENERIC_FAMILY_LABELS:
                     continue
-                seen.add(label.lower())
+                if len(label) < 3 or not any(c.isalpha() for c in label):
+                    continue
+                seen.add(key)
                 names.append(label)
         return names[:4]
 

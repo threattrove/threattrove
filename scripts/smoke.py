@@ -306,6 +306,45 @@ def engine_clearance() -> None:
           f"no scanner data keeps suspicion ({blind.verdict()})")
 
 
+def family_labels() -> None:
+    """A category word is not a family name."""
+    print("\n[family labels]")
+    from threattrove.sources import HybridAnalysis
+    ha = HybridAnalysis()
+    sha = "0" * 64
+
+    def entry(verdict, score, family, **scanners):
+        return {"sha256": sha, "verdict": verdict, "threat_score": score,
+                "vx_family": family, "last_file_name": "7zr.exe",
+                "type": "PE32 executable (console) Intel 80386", "size": 602624,
+                "analysis_start_time": "2025-01-02 03:04:05",
+                "whitelisted": False, "scanners_v2": scanners}
+
+    err = {"crowdstrike_ml": {"status": "error"}}
+
+    # The observed 7zr case: HA tags a 7-Zip binary "Malware" with every
+    # scanner silent. A category word must not convict the file.
+    res = ha._judge(entry("suspicious", 52, "Malware", **err), sha)
+    check(res.verdict == core.VERDICT_SUSPICIOUS,
+          f"generic family does not convict ({res.verdict})")
+    check(res.detail["family"] is None, "generic family dropped from detail")
+    check(res.detail["family_raw"] == "Malware", "raw family kept for display")
+
+    # A real family name still convicts without scanner support.
+    res = ha._judge(entry("malicious", None, "Emotet", **err), sha)
+    check(res.verdict == core.VERDICT_MALICIOUS, "specific family still convicts")
+    check(res.detail["family"] == "Emotet", "specific family kept")
+
+    # And the headline never reads "(Malware)".
+    rep = core.Report(indicator=core.parse_indicator(sha))
+    rep.results = [core.SourceResult(source="virustotal", status="found",
+                                     verdict=core.VERDICT_MALICIOUS,
+                                     note="12/70 engines flagged",
+                                     detail={"threat_label": "malware"})]
+    check(rep.families() == [], f"generic label filtered ({rep.families()})")
+    check("Malware" not in rep.headline(), f"headline clean: {rep.headline()}")
+
+
 def live(skip: bool) -> None:
     from threattrove import Engine, Store, ALL_SOURCES
     import tempfile
@@ -354,5 +393,6 @@ if __name__ == "__main__":
     report_view()
     sandbox_ha()
     engine_clearance()
+    family_labels()
     live("--offline" in sys.argv)
     print("\nall checks passed")
