@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""Refresh ThreatTrove's local blocklist from MalwareBazaar recent.csv.
+
+Install with::
+
+    install -Dm755 deploy/threattrove-refresh /usr/local/sbin/threattrove-refresh
+
+abuse.ch asks that "recent additions" (last 48 hours, regenerated every 5
+minutes) are not fetched more often than once every 5 minutes, and that full
+dumps are not fetched more than hourly. This job fetches recent.csv at most
+once per invocation and lets systemd pace it (hourly, see the .timer unit).
+
+The import is idempotent (INSERT OR REPLACE on the local primary key), so the
+48-hour overlap between runs relabels existing rows instead of duplicating them.
+Paths are the ones the systemd unit and nginx config already assume.
+"""
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+ENV_FILE = "/etc/threattrove/threattrove.env"
+DEST = "/var/lib/threattrove/recent.csv"
+APP_DIR = "/opt/threattrove"
+PY = "/opt/threattrove/.venv/bin/python"
+RUN_AS = "threattrove"
+URL = "https://mb-api.abuse.ch/v2/files/exports/{key}/recent.csv"
+
+
+def read_env() -> dict:
+    values = {}
+    with open(ENV_FILE, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            values[k.strip()] = v.strip().strip("'\"")
+    return values
+
+
+def fetch(key: str) -> int:
+    """Download recent.csv, retrying on a truncated stream. Returns bytes."""
+    last = None
+    for attempt in range(1, 4):
+        try:
+            req = urllib.request.Request(
+                URL.format(key=key),
+                headers={"User-Agent": "threattrove-refresh/1.0"})
+            tmp = DEST + ".part"
+            total = 0
+            with urllib.request.urlopen(req, timeout=120) as resp, \
+                    open(tmp, "wb") as out:
+                while True:
+                    chunk = resp.read(1 << 16)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    total += len(chunk)
+            if total < 2000:
+                raise IOError(f"suspiciously small response ({total} bytes)")
+            os.replace(tmp, DEST)
+            return total
+        except (urllib.error.URLError, IOError, OSError) as exc:
+            last = exc
+            time.sleep(5 * attempt)
+    raise SystemExit(f"download failed after 3 attempts: {last}")
+
+
+def main() -> int:
+    env = read_env()
+    key = env.get("ABUSECH_AUTH_KEY", "")
+    if not key:
+        print("ABUSECH_AUTH_KEY missing from env file", file=sys.stderr)
+        return 0  # not an error worth alerting on; nothing to refresh with
+
+    size = fetch(key)
+    print(f"downloaded recent.csv: {size:,} bytes")
+
+    cmd = [PY, "-m", "threattrove.cli", "--import-local", DEST,
+           "--label", "malware", "--note", "malwarebazaar recent additions"]
+    proc = subprocess.run(["sudo", "-u", RUN_AS, "env",
+                           f"TT_DB={env.get('TT_DB', '')}"] + cmd,
+                          cwd=APP_DIR, capture_output=True, text=True)
+    sys.stdout.write(proc.stdout)
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stderr)
+        return proc.returncode
+
+    stats = subprocess.run([PY, "-m", "threattrove.cli", "--stats"],
+                           cwd=APP_DIR, capture_output=True, text=True,
+                           env=dict(os.environ, TT_DB=env.get("TT_DB", "")))
+    for line in stats.stdout.splitlines():
+        if "local_entries" in line:
+            print(line.strip())
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

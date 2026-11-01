@@ -1,0 +1,15 @@
+[Unit]
+Description=ThreatTrove blocklist refresh (MalwareBazaar recent additions)
+Documentation=https://threattrove.com
+After=network-online.target threattrove.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/threattrove-refresh
+Nice=10
+IOSchedulingClass=idle
+# never let a hung download block the next scheduled run
+TimeoutStartSec=900
+StandardOutput=journal
+StandardError=journal

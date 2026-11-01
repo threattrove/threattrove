@@ -225,7 +225,10 @@ sources that actually report engines — a urlscan "6987 scans" is a scan count,
 not a detection count, and is shown as `–`.
 
 Deliberate anti-noise choices: OTX pulses that carry `Whitelisted domain` or
-`Known False Positive` validation are downgraded to UNKNOWN; two "suspicious"
+`Known False Positive` validation are downgraded to UNKNOWN, and a pulse whose
+tags say it is not a threat (`no problems`, `false positive`, `benign`, …) is
+not counted at all — otherwise a lab-coverage pulse titled "UAlberta Computer
+Lab Issues" makes every invented hash read suspicious; two "suspicious"
 sources never add up to "malicious"; and a family label that names a category
 rather than a family (`malware`, `trojan`, `generic`, `heur`, …) is neither used
 to convict a file nor shown in the headline. Hybrid Analysis fills `vx_family`
@@ -345,6 +348,43 @@ nginx -t && systemctl reload nginx
 certbot --nginx -d threattrove.com -d www.threattrove.com
 ```
 
+### Keeping the local blocklist current
+
+The site is far more useful with a real corpus behind it, and `--import-local`
+is how one is loaded. A full MalwareBazaar dump is a one-off (~510 MB of CSV,
+3.5 M hashes); the timer below keeps it moving afterwards.
+
+```bash
+# one-off: full dump, fetched once and folded in (about 6 minutes for 3.5M rows)
+curl -o full.csv.zip "https://mb-api.abuse.ch/v2/files/exports/$ABUSECH_AUTH_KEY/full.csv.zip"
+unzip -o full.csv.zip
+threattrove --import-local full.csv --dry-run     # count first, write nothing
+threattrove --import-local full.csv --label malware --note "malwarebazaar full dump"
+
+# recurring: hourly refresh from recent.csv (last 48 hours, ~430 KB)
+install -Dm755 deploy/threattrove-refresh /usr/local/sbin/threattrove-refresh
+install -Dm644 deploy/threattrove-refresh.service /etc/systemd/system/
+install -Dm644 deploy/threattrove-refresh.timer /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now threattrove-refresh.timer
+systemctl start threattrove-refresh.service      # run once now
+journalctl -u threattrove-refresh.service -n 20 --no-pager
+```
+
+The old documented export URLs (`/export/csv/full/`, `/export/txt/sha256/full/`)
+now answer **410 Gone**; the live endpoint takes the Auth-Key in the path, as
+above. `recent.csv` is regenerated every five minutes and full dumps hourly, so
+fetching recent.csv hourly is well inside abuse.ch's guidance. The import is
+idempotent, so the 48-hour overlap between runs relabels rows instead of
+doubling them — a second run in a row reports `inserted 0`.
+
+Check that the timer is armed and that the last run succeeded:
+
+```bash
+systemctl list-timers threattrove-refresh.timer
+systemctl show threattrove-refresh.service -p Result -p ExecMainStatus
+```
+
 `deploy/gunicorn.conf.py` binds `127.0.0.1:8080`, 2 gthread workers × 8 threads,
 120s timeout (bulk lookups are slow by nature). Nginx adds TLS/HSTS, gzip,
 static caching and per-zone rate limits.
@@ -374,7 +414,7 @@ threattrove/
   templates/    Jinja2 views
   static/       app.js, style.css, favicon.svg
 scripts/smoke.py        offline parser/verdict checks + live lookups
-deploy/                 gunicorn, systemd, nginx, env example
+deploy/                 gunicorn, systemd, nginx, env example, blocklist refresh
 legacy/threattrove-v1-cli.py   original single-file CLI (superseded, kept for reference)
 Dockerfile, docker-compose.yml
 ```

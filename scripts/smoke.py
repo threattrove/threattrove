@@ -345,6 +345,46 @@ def family_labels() -> None:
     check("Malware" not in rep.headline(), f"headline clean: {rep.headline()}")
 
 
+def otx_pulses() -> None:
+    """A pulse tagged as not-a-threat must not convict anything."""
+    print("\n[otx pulses]")
+    from threattrove import sources as src
+
+    # The real response behind the all-f hash: a lab-issues pulse whose only
+    # verdict-ish tag is "no problems".
+    junk = {"pulse_info": {"count": 1, "pulses": [
+        {"name": "UAlberta Computer Lab Issues",
+         "tags": ["drive", "problems1", "data", "no problems"]}]}}
+    convicting, raw, ignored, names = src._otx_pulse_count(junk)
+    check((convicting, raw, ignored) == (0, 1, 1),
+          f"no-threat pulse ignored ({convicting} of {raw}, {ignored} ignored)")
+    check(bool(names) and "UAlberta" in names[0], f"ignored pulse named ({names})")
+    verdict, note = src._otx_verdict(convicting, [], core.KIND_HASH)
+    check(verdict == core.VERDICT_UNKNOWN, f"junk pulse does not convict ({verdict})")
+    check("ignored" in src._note_ignored(note, ignored),
+          f"note stays honest: {src._note_ignored(note, ignored)}")
+
+    # A genuinely pulsed hash keeps its other pulses and still convicts.
+    mixed = {"pulse_info": {"count": 5, "pulses": [
+        {"name": "Emotet campaign", "tags": ["emotet", "loader"]},
+        {"name": "Lab test", "tags": ["No Problems"]},
+        {"name": "Qakbot", "tags": ["qakbot"]}]}}
+    convicting, raw, ignored, _ = src._otx_pulse_count(mixed)
+    check((convicting, raw, ignored) == (4, 5, 1),
+          f"real pulses survive ({convicting} of {raw})")
+    verdict, _ = src._otx_verdict(convicting, [], core.KIND_HASH)
+    check(verdict == core.VERDICT_MALICIOUS, f"real pulses still convict ({verdict})")
+
+    # Only the benign pulses we can actually see are discounted.
+    paged = {"pulse_info": {"count": 40,
+                            "pulses": [{"name": "x", "tags": ["benign"]}]}}
+    check(src._otx_pulse_count(paged)[0] == 39, "paged count reduced only by visible pulses")
+
+    # Older responses carry a count with no pulse list; leave it untouched.
+    check(src._otx_pulse_count({"pulse_info": {"count": 3}})[0] == 3,
+          "count without pulse list is untouched")
+
+
 def local_corpus() -> None:
     """Bulk-imported blocklists convict on their own, and parse by shape."""
     print("\n[local import]")
@@ -466,6 +506,7 @@ if __name__ == "__main__":
     sandbox_ha()
     engine_clearance()
     family_labels()
+    otx_pulses()
     local_corpus()
     live("--offline" in sys.argv)
     print("\nall checks passed")

@@ -16,7 +16,7 @@ import datetime as _dt
 import json
 import os
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -69,6 +69,44 @@ def _otx_verdict(pulses: int, validation: List[str], kind: str) -> tuple:
     if pulses >= 1:
         return VERDICT_SUSPICIOUS, f"appears in {pulses} pulse(s)"
     return VERDICT_UNKNOWN, "no pulses"
+
+
+#: Pulse tags that say, in so many words, that the indicator is not a threat.
+#: Analysts use them to cover their own lab traffic, and OTX then reports the
+#: indicator as "pulsed" even though nothing was ever accused. A pulse named
+#: "UAlberta Computer Lab Issues" tagged ``no problems`` lists the all-``f``
+#: hash, so without this rule every invented hash reads suspicious.
+OTX_BENIGN_TAGS = frozenset({
+    "no problems", "no problem", "no issues", "no threat", "not a threat",
+    "not malicious", "not malware", "false positive", "false-positive",
+    "benign", "clean", "whitelist", "whitelisted",
+})
+
+
+def _otx_pulse_count(data: dict) -> Tuple[int, int, int, List[str]]:
+    """Split OTX pulses into convicting and no-threat ones.
+
+    Returns ``(convicting, raw, ignored, ignored_names)``. Only pulses actually
+    present in the response are examined, so a paged ``count`` larger than the
+    pulse list is reduced by the benign ones we can see and no further.
+    """
+    info = data.get("pulse_info") or {}
+    raw = int(info.get("count", 0) or 0)
+    ignored_names: List[str] = []
+    for pulse in info.get("pulses") or []:
+        tags = {str(t).strip().lower() for t in (pulse.get("tags") or [])}
+        if tags & OTX_BENIGN_TAGS:
+            ignored_names.append(_short(pulse.get("name") or "unnamed pulse", 60))
+    if not ignored_names:
+        return raw, raw, 0, []
+    return max(0, raw - len(ignored_names)), raw, len(ignored_names), ignored_names
+
+
+def _note_ignored(note: str, ignored: int) -> str:
+    """Make an ignored-pulse count visible instead of silently dropping it."""
+    if not ignored:
+        return note
+    return f"{note}, {ignored} no-threat pulse(s) ignored"
 
 
 # ==========================================================================
@@ -135,18 +173,20 @@ class AlienVaultOTXFile(Source):
         if r.status_code != 200:
             return self.result(status="error", note=f"HTTP {r.status_code}")
         data = r.json()
-        pulses = (data.get("pulse_info") or {}).get("count", 0) or 0
+        pulses, raw_pulses, ignored, _ = _otx_pulse_count(data)
         analysis = data.get("analysis") or {}
         det = int(analysis.get("detection", 0) or 0)
         total = int(analysis.get("analysis", 0) or 0)
         validation = [v.get("name") for v in (data.get("validation") or [])
                       if v.get("name")]
-        detail = {"pulses": pulses, "validation": validation[:4],
+        detail = {"pulses": pulses, "pulses_raw": raw_pulses,
+                  "pulses_ignored": ignored, "validation": validation[:4],
                   "engines": bool(total),
                   "names": _short(
                       (data.get("base_indicator") or {}).get("title", ""), 80)}
         link = f"https://otx.alienvault.com/indicator/file/{h}"
         verdict, note = _otx_verdict(pulses, validation, KIND_HASH)
+        note = _note_ignored(note, ignored)
         return self.result(status="found", verdict=verdict, detections=det,
                            total=total, note=note, link=link, detail=detail)
 
@@ -580,13 +620,15 @@ class AlienVaultOTXUrl(Source):
         if r.status_code != 200:
             return self.result(status="error", note=f"HTTP {r.status_code}")
         data = r.json()
-        pulses = (data.get("pulse_info") or {}).get("count", 0) or 0
+        pulses, raw_pulses, ignored, _ = _otx_pulse_count(data)
         validation = [v.get("name") for v in (data.get("validation") or [])
                       if v.get("name")]
-        detail = {"pulses": pulses, "validation": validation[:5],
+        detail = {"pulses": pulses, "pulses_raw": raw_pulses,
+                  "pulses_ignored": ignored, "validation": validation[:5],
                   "url_list_count": len(data.get("url_list") or [])}
         link = f"https://otx.alienvault.com/indicator/url/{q}"
         verdict, note = _otx_verdict(pulses, validation, KIND_URL)
+        note = _note_ignored(note, ignored)
         return self.result(status="found", verdict=verdict, detections=pulses,
                            note=note, link=link, detail=detail)
 
@@ -807,16 +849,18 @@ class AlienVaultOTXDomain(Source):
         if r.status_code != 200:
             return self.result(status="error", note=f"HTTP {r.status_code}")
         data = r.json()
-        pulses = (data.get("pulse_info") or {}).get("count", 0) or 0
+        pulses, raw_pulses, ignored, _ = _otx_pulse_count(data)
         mal = (data.get("malware") or {}).get("count", 0) or 0
         validation = [v.get("name") for v in (data.get("validation") or [])
                       if v.get("name")]
-        detail = {"pulses": pulses, "malware_samples": mal,
+        detail = {"pulses": pulses, "pulses_raw": raw_pulses,
+                  "pulses_ignored": ignored, "malware_samples": mal,
                   "validation": validation[:4],
                   "asn": _short(data.get("asn"), 40),
                   "country": _short(data.get("country_name"), 40)}
         link = f"https://otx.alienvault.com/indicator/{section}/{ind.value}"
         verdict, note = _otx_verdict(pulses, validation, ind.kind)
+        note = _note_ignored(note, ignored)
         return self.result(status="found", verdict=verdict, detections=pulses,
                            note=note, link=link, detail=detail)
 

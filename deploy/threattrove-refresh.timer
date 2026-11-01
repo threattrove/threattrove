@@ -1,0 +1,13 @@
+[Unit]
+Description=Hourly ThreatTrove blocklist refresh
+
+[Timer]
+# abuse.ch regenerates recent.csv every 5 minutes but asks for restraint;
+# hourly is well inside their guidance and matches their full-dump cadence.
+OnCalendar=hourly
+RandomizedDelaySec=300
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
