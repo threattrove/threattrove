@@ -14,7 +14,6 @@ from __future__ import annotations
 import base64
 import datetime as _dt
 import json
-import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -304,11 +303,28 @@ class URLhausPayload(Source):
                     "firstseen": data.get("firstseen")})
 
 
-class VirusTotalFile(Source):
-    name = "virustotal"
-    display = "VirusTotal (files)"
+#: VirusTotal's free public key allows 500 requests a day and 4 a minute. A
+#: single lookup can ask for the file, the URL and the domain, so the allowance
+#: belongs to the key, not to the endpoint: all three sources spend from one
+#: budget. The default stops short of the ceiling on purpose, so a burst of
+#: lookups cannot use up the whole day and leave later ones with nothing.
+VT_DAILY_BUDGET = 400
+VT_BUDGET_ENV = "TT_VT_DAILY_BUDGET"
+
+
+class _VirusTotalQuota:
+    """Everything the three VirusTotal sources share: one key, one allowance."""
+
     env_key = "VT_API_KEY"
     homepage = "https://www.virustotal.com/"
+    quota_key = "virustotal"
+    daily_budget = VT_DAILY_BUDGET
+    budget_env = VT_BUDGET_ENV
+
+
+class VirusTotalFile(_VirusTotalQuota, Source):
+    name = "virustotal"
+    display = "VirusTotal (files)"
     kinds = (KIND_HASH,)
     logic_version = 2       # 2.1.9: a stray engine flag is not a verdict
 
@@ -739,11 +755,9 @@ class URLhausUrl(Source):
                     "reporter": data.get("reporter")})
 
 
-class VirusTotalUrl(Source):
+class VirusTotalUrl(_VirusTotalQuota, Source):
     name = "virustotal_url"
     display = "VirusTotal (URL)"
-    env_key = "VT_API_KEY"
-    homepage = "https://www.virustotal.com/"
     kinds = (KIND_URL,)
     logic_version = 2       # 2.1.9: a stray engine flag is not a verdict
 
@@ -871,12 +885,20 @@ class AlienVaultOTXDomain(Source):
                            note=note, link=link, detail=detail)
 
 
-class VirusTotalDomain(Source):
+class VirusTotalDomain(_VirusTotalQuota, Source):
+    """Domain/IP reputation, off by default because it is the weakest use.
+
+    Every public IP and most popular domains carry a flag or two out of ninety
+    engines, so this endpoint spends quota to say very little: the engine floor
+    in ``_vt_parse`` mostly reduces it to "no verdict". It is kept behind
+    ``TT_VT_DOMAINS`` so the free allowance goes to files and URLs, where the
+    answer is a determination rather than noise.
+    """
+
     name = "virustotal_domain"
     display = "VirusTotal (domain/IP)"
-    env_key = "VT_API_KEY"
-    homepage = "https://www.virustotal.com/"
     kinds = (KIND_DOMAIN, KIND_IP)
+    opt_in = "TT_VT_DOMAINS"
     logic_version = 2       # 2.1.9: a stray engine flag is not a verdict
 
     def lookup(self, ind: Indicator) -> SourceResult:
@@ -1066,10 +1088,7 @@ class ReverseIP(Source):
     category = "intel"
     cache_ttl = 24 * 3600
     min_interval = 2.0
-
-    def available(self) -> bool:
-        return os.environ.get("TT_ENABLE_REVERSE_IP", "").lower() in (
-            "1", "true", "yes", "on")
+    opt_in = "TT_ENABLE_REVERSE_IP"
 
     def lookup(self, ind: Indicator) -> SourceResult:
         try:
@@ -1114,6 +1133,18 @@ def _vt_floor(total: int) -> int:
     return max(VT_MIN_ENGINES, int(round(total * VT_MIN_SHARE)))
 
 
+def _vt_error_text(r: requests.Response) -> str:
+    """The ``error.message`` of a VirusTotal response, or "" when absent."""
+    try:
+        data = r.json()
+    except ValueError:
+        return r.text[:200]
+    err = data.get("error") if isinstance(data, dict) else None
+    if isinstance(err, dict):
+        return str(err.get("message") or err.get("code") or "")
+    return str(err or "")[:200]
+
+
 def _vt_parse(source: Source, r: requests.Response, file_hash: str = "",
                url_value: str = "", vt_kind: str = "url") -> SourceResult:
     """Shared parser for every VirusTotal object response."""
@@ -1122,6 +1153,14 @@ def _vt_parse(source: Source, r: requests.Response, file_hash: str = "",
     if r.status_code == 404:
         return source.result(status="not_found")
     if r.status_code == 429:
+        # Two different refusals share this status: the per-minute limit, which
+        # passes, and the daily allowance, which does not until tomorrow. The
+        # body says which; treating a spent day as a burst would keep every
+        # later lookup hammering a key that cannot answer.
+        if "quota" in _vt_error_text(r).lower():
+            return source.result(
+                status="error",
+                note="daily quota exceeded (free key: 500/day)")
         return source.result(status="error", note="rate limited (free tier: 4/min)")
     if r.status_code != 200:
         return source.result(status="error", note=f"HTTP {r.status_code}")

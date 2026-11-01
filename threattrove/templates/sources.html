@@ -28,8 +28,19 @@
         <td class="mono note">{{ 'none' if s.keyless else (s.env_key or 'none') }}</td>
         <td>
           {% if s.state == 'active' %}<span class="tag clean">active</span>
-          {% elif s.state == 'disabled' %}<span class="tag unknown">opt-in</span>
+          {% elif s.state == 'disabled' %}<span class="tag unknown">off</span>
           {% else %}<span class="tag error">needs key</span>{% endif %}
+          {% if s.state == 'disabled' and s.opt_in %}
+          <div class="note mono" style="font-size:11px">set {{ s.opt_in }}=1</div>
+          {% endif %}
+          {% if s.quota %}
+          <div class="note mono" style="font-size:11px">
+            {% if s.quota.limit is not none %}{{ s.quota.used }}/{{ s.quota.limit }} today
+            {% else %}{{ s.quota.used }} today{% endif %}
+            {% if s.quota.shared > 1 %} · shared by {{ s.quota.shared }} sources{% endif %}
+            {% if s.quota.exhausted %} · spent{% endif %}
+          </div>
+          {% endif %}
         </td>
       </tr>
     {% endfor %}
@@ -58,6 +69,21 @@ PHISHTANK_APPKEY=...      # phishtank.com</pre>
     DNS, RDAP and Certificate Transparency) answer without any key, so a fresh
     install is useful immediately. Reverse IP lookups are free but rate
     limited, so they stay off until you set <code>TT_ENABLE_REVERSE_IP=1</code>.
+  </p>
+  <h2>Shared daily allowance</h2>
+  <p class="note" style="margin-top:0">
+    The three VirusTotal sources spend one key's allowance between them: a
+    lookup of a hash, a URL and a domain is three requests. The app keeps a
+    per-day counter and stops asking once the budget is gone, so a busy day
+    ends with “budget spent” answers instead of rate-limit errors. Raise or
+    lower it with <code>TT_VT_DAILY_BUDGET</code> (default 400; the free key
+    allows 500).
+  </p>
+  <p class="note">
+    VirusTotal's domain and IP lookup is off by default
+    (<code>TT_VT_DOMAINS=1</code> turns it on). A stray engine flag on a shared
+    IP address or a popular domain says almost nothing, so this endpoint mostly
+    buys noise, and the allowance is better spent on files and URLs.
   </p>
 </div>
 {% endblock %}

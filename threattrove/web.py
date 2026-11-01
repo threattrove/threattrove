@@ -139,16 +139,35 @@ def _json_report(report: Any, include_results: bool = True) -> Dict[str, Any]:
     return data
 
 
+def _quota_row(runtime: Runtime, source: Any) -> Optional[Dict[str, Any]]:
+    """Today's usage of a shared provider allowance, for the sources page."""
+    if not source.quota_key:
+        return None
+    limit = source.budget()
+    used, exhausted = 0, False
+    try:
+        state = runtime.store.quota_state(source.quota_key)
+        used, exhausted = state["used"], state["exhausted"]
+    except Exception:      # a read-only or locked database must not break the page
+        pass
+    shared = sum(1 for o in ALL_SOURCES if o.quota_key == source.quota_key)
+    return {"key": source.quota_key, "used": used, "limit": limit,
+            "exhausted": exhausted, "shared": shared}
+
+
 def _source_rows(runtime: Runtime) -> List[Dict[str, Any]]:
     rows = []
     for s in ALL_SOURCES:
         active = s.available()
+        missing = s.opt_in_missing()
         if active:
             state, hint = "active", ""
+        elif missing:
+            # a source that is ready but switched off on purpose says how to
+            # switch it on, so nobody goes looking for a missing key
+            state, hint = "disabled", missing
         elif s.keyless:
-            # keyless sources that opt in through a flag instead of a key
-            state = "disabled"
-            hint = "opt-in flag"
+            state, hint = "disabled", "opt-in flag"
         else:
             state, hint = "needs_key", s.env_key or ""
         rows.append({
@@ -162,6 +181,8 @@ def _source_rows(runtime: Runtime) -> List[Dict[str, Any]]:
             "active": active,
             "state": state,
             "hint": hint,
+            "opt_in": s.opt_in,
+            "quota": _quota_row(runtime, s),
         })
     return rows
 

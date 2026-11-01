@@ -309,7 +309,8 @@ anonymous hash.
 | RDAP | domain/ip | intel | keyless | — |
 | crt.sh | domain | intel | keyless | — |
 | reverse IP (HackerTarget) | domain/ip | intel | keyless, **opt-in** | `TT_ENABLE_REVERSE_IP=1` |
-| VirusTotal (file/url/domain) | hash/url/domain/ip | reputation | keyed | `VT_API_KEY` |
+| VirusTotal (file/url) | hash/url | reputation | keyed | `VT_API_KEY` |
+| VirusTotal (domain/IP) | domain/ip | reputation | keyed, **opt-in** | `VT_API_KEY` + `TT_VT_DOMAINS=1` |
 | MalwareBazaar | hash | reputation | keyed | `ABUSECH_AUTH_KEY` |
 | ThreatFox | hash/url/domain/ip | reputation | keyed | `ABUSECH_AUTH_KEY` |
 | URLhaus (hash + URL) | hash/url | reputation | keyed | `ABUSECH_AUTH_KEY` |
@@ -327,6 +328,19 @@ Notes:
   ThreatTrove reports as `unauthorized` — the run continues.
 * `TT_ENABLE_REVERSE_IP` is off by default because that lookup sends the queried
   IP/hostname to a third-party service. That's the one source gated on consent.
+* `TT_VT_DOMAINS` is off by default for a different reason. VirusTotal's
+  domain/IP endpoint mostly reports a stray engine or two out of ninety, which
+  the engine floor already reduces to "no verdict", so it spends the key's
+  allowance to say very little. Set `TT_VT_DOMAINS=1` to turn it back on.
+* The three VirusTotal sources share one daily allowance, because they spend one
+  key. The cap is `TT_VT_DAILY_BUDGET` (default 400 of the 500 a free key
+  allows), counted per UTC day in the SQLite database. When it is reached — or
+  VirusTotal itself answers `quota exceeded` — those sources report `skipped`
+  with the counter in the note and make no further requests until the day rolls
+  over. Cached answers are still served, so a repeated lookup costs nothing,
+  and the skipped answer is not cached, so a lookup gets a real answer again
+  tomorrow. `/sources` and `/api/v1/sources` show `used/limit today` for each
+  shared allowance.
 * Sources without a key are simply skipped and listed as `needs key` in
   `/sources`; they never fail a lookup.
 * Hybrid Analysis is read through `GET /api/v2/overview/{sha256}`; the older
@@ -358,6 +372,8 @@ Copy `deploy/threattrove.env.example` and edit. The important ones:
 | `TT_SITE_URL` | `https://threattrove.com` | canonical base URL |
 | `TT_SITE_NAME` | `ThreatTrove` | brand shown in nav, titles, OG tags |
 | `TT_ENABLE_REVERSE_IP` | *(empty)* | `1` enables reverse-IP |
+| `TT_VT_DOMAINS` | *(empty)* | `1` enables VirusTotal domain/IP lookups |
+| `TT_VT_DAILY_BUDGET` | `400` | VirusTotal requests/day, shared by its three sources |
 
 ### Cache invalidation
 
@@ -496,6 +512,8 @@ Dockerfile, docker-compose.yml
 ```bash
 .venv/bin/python scripts/smoke.py --offline   # parsing, verdicts, evidence, clearance, blocklist import, cache versions
 .venv/bin/python scripts/smoke.py             # + live hash/URL/domain lookups
+.venv/bin/python scripts/check_vt_floor.py    # engine-ratio floor (offline)
+.venv/bin/python scripts/check_quota.py       # shared allowance, skipped answers, sources page (offline)
 ```
 
 ## Limitations

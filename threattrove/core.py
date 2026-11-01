@@ -22,7 +22,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
 
-VERSION = "2.1.9"
+VERSION = "2.2.0"
 
 DEFAULT_TIMEOUT = float(os.environ.get("TT_TIMEOUT", "20"))
 CACHE_TTL_SECONDS = int(os.environ.get("TT_CACHE_TTL", str(7 * 24 * 3600)))
@@ -119,6 +119,34 @@ CORROBORATION_CONFIDENCE = {1: 45, 2: 75, 3: 88, 4: 93}
 CORROBORATION_CONFIDENCE_MAX = 96
 CONFIDENCE_CAP = 98
 SUSPICIOUS_CONFIDENCE = 60
+
+#: words in a source's error note that mean the provider's daily allowance is
+#: gone, not that one request came too soon. Only these stop a source for the
+#: rest of the day; a plain per-minute 429 keeps being retried.
+QUOTA_EXHAUSTED_MARKERS = (
+    "daily quota", "quota exceeded", "quota exhausted", "daily limit",
+    "50/day", "per day",
+)
+
+
+def _truthy(value: Optional[str]) -> bool:
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _utc_day(ts: Optional[float] = None) -> str:
+    """The UTC calendar day a quota counter belongs to (``YYYY-MM-DD``).
+
+    A UTC day is used because every provider resets its free allowance on its
+    own midnight, and the attribution is used for budgeting rather than
+    billing.
+    """
+    return time.strftime("%Y-%m-%d", time.gmtime(time.time() if ts is None else ts))
+
+
+def quota_exhausted_note(note: Optional[str]) -> bool:
+    """True when an error note says the provider's daily quota ran out."""
+    text = str(note or "").lower()
+    return any(marker in text for marker in QUOTA_EXHAUSTED_MARKERS)
 
 
 def combine(weights: Sequence[int]) -> Tuple[str, int]:
@@ -987,11 +1015,18 @@ CREATE TABLE IF NOT EXISTS history (
 );
 CREATE INDEX IF NOT EXISTS history_ts ON history(ts DESC);
 CREATE INDEX IF NOT EXISTS history_value ON history(kind, value);
+CREATE TABLE IF NOT EXISTS quota (
+    quota     TEXT NOT NULL,
+    day       TEXT NOT NULL,
+    used      INTEGER NOT NULL DEFAULT 0,
+    exhausted INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (quota, day)
+);
 """
 
 
 class Store:
-    """SQLite-backed cache, custom local verdicts and lookup history."""
+    """SQLite-backed cache, custom local verdicts, lookup history and quotas."""
 
     def __init__(self, path: Optional[str | Path] = None):
         if path is None:
@@ -1079,6 +1114,63 @@ class Store:
             )
             self.conn.commit()
             return cur.rowcount
+
+    # -- provider quotas --------------------------------------------------
+    def quota_state(self, quota: str) -> Dict[str, Any]:
+        """Today's usage for one provider quota."""
+        day = _utc_day()
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT used, exhausted FROM quota WHERE quota=? AND day=?",
+                (quota, day)).fetchone()
+        used, exhausted = row if row else (0, 0)
+        return {"quota": quota, "day": day, "used": int(used),
+                "exhausted": bool(exhausted)}
+
+    def take_quota(self, quota: str, limit: Optional[int]) -> bool:
+        """Reserve one call against today's allowance for *quota*.
+
+        Returns False when the allowance is spent or the provider already said
+        no today, in which case the caller must not make the request. The
+        increment happens before the call, in one guarded statement, so a
+        crash mid-call can never let more requests through than the budget.
+        """
+        day = _utc_day()
+        with self._lock:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO quota (quota, day, used, exhausted)"
+                " VALUES (?,?,0,0)", (quota, day))
+            sql = ("UPDATE quota SET used=used+1"
+                   " WHERE quota=? AND day=? AND exhausted=0")
+            params: List[Any] = [quota, day]
+            if limit is not None:
+                sql += " AND used<?"
+                params.append(int(limit))
+            cur = self.conn.execute(sql, params)
+            self.conn.commit()
+            return cur.rowcount > 0
+
+    def exhaust_quota(self, quota: str, limit: Optional[int] = None) -> None:
+        """Stop asking *quota* for the rest of the UTC day.
+
+        Called when the provider itself refuses. A provider that has said no
+        will keep saying no, so every later lookup of this kind is answered
+        from what is already cached instead of burning retries.
+        """
+        day = _utc_day()
+        with self._lock:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO quota (quota, day, used, exhausted)"
+                " VALUES (?,?,0,0)", (quota, day))
+            if limit is not None:
+                self.conn.execute(
+                    "UPDATE quota SET exhausted=1, used=MAX(used, ?)"
+                    " WHERE quota=? AND day=?", (int(limit), quota, day))
+            else:
+                self.conn.execute(
+                    "UPDATE quota SET exhausted=1 WHERE quota=? AND day=?",
+                    (quota, day))
+            self.conn.commit()
 
     # -- local custom verdicts -------------------------------------------
     def get_local(self, kind: str, value: str) -> Optional[Dict[str, Any]]:
@@ -1224,6 +1316,19 @@ class Source:
     category: str = "reputation"
     min_interval: float = 0.0
     cache_ttl: Optional[int] = None
+    #: Env var that must be truthy before this source runs at all. Used for
+    #: sources that cost quota or are rate limited per day without needing a
+    #: key of their own, so they stay off until explicitly switched on.
+    opt_in: Optional[str] = None
+    #: Name of the provider quota this source draws on. Every source sharing
+    #: the same value spends one shared daily budget, so a hash lookup, a URL
+    #: lookup and a domain lookup are counted together rather than each
+    #: getting its own allowance.
+    quota_key: Optional[str] = None
+    #: Calls per UTC day allowed on ``quota_key``. ``None`` means unlimited.
+    daily_budget: Optional[int] = None
+    #: Env var that overrides ``daily_budget`` at runtime.
+    budget_env: Optional[str] = None
     #: Bump when the verdict or parsing rules of this source change. Cached
     #: entries carrying an older number are ignored, so a corrected verdict
     #: takes effect on the next lookup instead of up to ``cache_ttl`` later.
@@ -1234,7 +1339,29 @@ class Source:
             return None
         return os.environ.get(self.env_key) or None
 
+    def opted_in(self) -> bool:
+        """True when this source has no opt-in flag, or the flag is set."""
+        if not self.opt_in:
+            return True
+        return _truthy(os.environ.get(self.opt_in, ""))
+
+    def opt_in_missing(self) -> Optional[str]:
+        """The opt-in variable still to be set, or ``None`` when it is set."""
+        return None if self.opted_in() else (self.opt_in or None)
+
+    def budget(self) -> Optional[int]:
+        """Daily call allowance, honouring the ``budget_env`` override."""
+        raw = os.environ.get(self.budget_env, "").strip() if self.budget_env else ""
+        if raw:
+            try:
+                return max(0, int(raw))
+            except ValueError:
+                pass
+        return self.daily_budget
+
     def available(self) -> bool:
+        if not self.opted_in():
+            return False
         return self.keyless or self.env_key is None or bool(self.key())
 
     def supports(self, kind: str) -> bool:
@@ -1385,11 +1512,30 @@ class Engine:
                 logic_version=source.logic_version)
             if cached:
                 return cached
+
+        # A provider with a daily allowance is charged before the call, and the
+        # lookup is simply not made once the allowance is gone: an answer that
+        # says the budget is spent is more useful than a 429 or an empty report.
+        limit = source.budget() if source.quota_key else None
+        if source.quota_key and self.store:
+            try:
+                allowed = self.store.take_quota(source.quota_key, limit)
+            except sqlite3.Error:
+                allowed = True       # never lose a lookup to a bookkeeping error
+            if not allowed:
+                return self._quota_exhausted(source, limit)
+
         self._pace(source)
         try:
             res = source.lookup(ind)
         except requests.RequestException as exc:
             return source.fail(exc)
+        if (source.quota_key and self.store and res.status == "error"
+                and quota_exhausted_note(res.note)):
+            try:
+                self.store.exhaust_quota(source.quota_key, limit)
+            except sqlite3.Error:
+                pass
         if self.store and res.status in ("found", "not_found", "matched",
                                          "no_match"):
             try:
@@ -1402,6 +1548,26 @@ class Engine:
             except sqlite3.Error:
                 pass
         return res
+
+    def _quota_exhausted(self, source: Source, limit: Optional[int]) -> SourceResult:
+        """The result for a source whose daily allowance is spent."""
+        used, spent_by_provider = limit, False
+        if self.store:
+            try:
+                state = self.store.quota_state(source.quota_key or "")
+                used = state["used"] if limit is None else max(used or 0, state["used"])
+                spent_by_provider = state["exhausted"]
+            except sqlite3.Error:
+                pass
+        of = f"{used if used is not None else '?'}/" + (
+            str(limit) if limit is not None else "unlimited")
+        why = ("provider says the daily allowance is spent"
+               if spent_by_provider else "daily budget spent")
+        return source.result(
+            status="skipped",
+            note=f"{why} ({of} {source.quota_key} today), not asked",
+            detail={"quota": source.quota_key, "used": used, "limit": limit,
+                    "exhausted": spent_by_provider})
 
     # -- bulk -------------------------------------------------------------
     def lookup_many(self, indicators: Iterable[Indicator],
