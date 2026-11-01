@@ -149,8 +149,10 @@ Each source returns `verdict`, `detections`/`total` (engines), `note` and a raw
 
 | Condition | Verdict |
 | --- | --- |
-| 2 or more sources say malicious | MALICIOUS |
+| 2 or more sources say malicious, at least one examined the file | MALICIOUS |
+| 2 or more sources say malicious, none examined the file | SUSPICIOUS, confidence capped at 45 |
 | 1 source says malicious (no allowlist conflict) | SUSPICIOUS |
+| Sources say suspicious, none say malicious, and the engines cleared the file | CLEAN, with the weak flags named |
 | Sources say suspicious, none say malicious | SUSPICIOUS |
 | A malware feed and a curated allowlist both match | UNKNOWN (refuse to guess) |
 | Source says known-good (NSRL, whitelist) | KNOWN GOOD |
@@ -172,6 +174,18 @@ floor exists: a lone feed hit is frequently a stale entry, an over-broad
 signature, or a shared-hosting address, and calling that "malicious" is how a
 lookup tool loses its users' trust. One hit is reported as a lead, with the
 name of the source that produced it.
+
+Two rules keep genuine vendor software out of the alarm path. **Direct
+evidence**: only sources that examined the file itself (sample repositories,
+engine scans, sandboxes, a local analyst) can convict, because feeds record
+where a copy was *served from* and routinely accuse software that attackers
+re-hosted — the classic case is an authentic installer listed as a URLhaus
+payload. **Engine clearance**: when every antivirus engine that scanned the file
+reports zero detections over at least two engine slots, heuristic-only
+suspicion (a sandbox behavioural score, an OTX pulse) is demoted to CLEAN with a
+confidence of 35, and the headline names the sources that still flag it. A
+conviction is never erased by a clean sweep, and a single scanner is not enough
+to call a sweep.
 
 Every report also carries an **evidence breakdown** (`evidence` in the JSON,
 an evidence strip on the result page) that groups the sources that answered into
@@ -338,7 +352,7 @@ Dockerfile, docker-compose.yml
 ## Testing
 
 ```bash
-.venv/bin/python scripts/smoke.py --offline   # 14 parsing + 11 verdict + 18 report checks
+.venv/bin/python scripts/smoke.py --offline   # parsing, verdict math, evidence, sandbox, clearance
 .venv/bin/python scripts/smoke.py             # + live hash/URL/domain lookups
 ```
 

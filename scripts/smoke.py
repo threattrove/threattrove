@@ -226,6 +226,86 @@ def sandbox_ha() -> None:
     check(classes.get("sandbox", {}).get("hit") == 1, "HA lands in the sandbox class")
 
 
+def engine_clearance() -> None:
+    """A clean engine sweep must outrank heuristic-only suspicion."""
+    print("\n[engine clearance]")
+    from threattrove.sources import HybridAnalysis
+    ha = HybridAnalysis()
+    sha = "0" * 64
+
+    def ha_result(verdict, score=None, **scanners):
+        entry = {"sha256": sha, "verdict": verdict, "threat_score": score,
+                 "vx_family": "", "last_file_name": "7z2501-x64.exe",
+                 "type": "PE32 executable (GUI) Intel 80386", "size": 1234,
+                 "analysis_start_time": "2025-01-02 03:04:05",
+                 "whitelisted": False, "scanners_v2": scanners}
+        return ha._judge(entry, sha)
+
+    def otx(verdict, pulses=1):
+        return core.SourceResult(source="otx", status="found", verdict=verdict,
+                                 note=f"{pulses} pulse(s)",
+                                 detail={"pulses": pulses})
+
+    def urlhaus(verdict):
+        return core.SourceResult(source="urlhaus", status="found",
+                                 verdict=verdict, note="payload seen in URLhaus")
+
+    two_clean = {"metadefender": {"status": "clean"},
+                 "crowdstrike_ml": {"status": "clean"}}
+    one_clean = {"metadefender": {"status": "clean"}}
+    one_bad = {"metadefender": {"status": "malicious"}}
+
+    def report(*results):
+        rep = core.Report(indicator=core.parse_indicator(sha))
+        rep.results = list(results)
+        return rep
+
+    # Authentic 7-Zip: behavioural score plus one pulse, zero engine agreement.
+    rep = report(ha_result("suspicious", 75, **two_clean),
+                 otx(core.VERDICT_SUSPICIOUS))
+    check(rep.engine_cleared(), "0/2 engines -> cleared")
+    check(rep.verdict() == core.VERDICT_CLEAN,
+          f"engine sweep outranks heuristics ({rep.verdict()})")
+    check(rep.confidence() <= core.ENGINE_CLEARED_CONFIDENCE,
+          f"cleared file keeps a low confidence ({rep.confidence()})")
+    check("0/2 engines flagged this" in rep.headline(),
+          f"headline cites the sweep: {rep.headline()}")
+    check("hybridanalysis" in rep.headline() and "otx" in rep.headline(),
+          f"headline names the weak flags: {rep.headline()}")
+
+    # Authentic PuTTY: two feeds call it malicious without scanning it. The
+    # engines agree there is nothing wrong, yet a conviction is not erased.
+    putty = report(ha_result("no specific threat", None, **two_clean),
+                   otx(core.VERDICT_MALICIOUS, pulses=5),
+                   urlhaus(core.VERDICT_MALICIOUS))
+    check(putty.engine_cleared(), "putty engines cleared too")
+    check(putty.verdict() == core.VERDICT_SUSPICIOUS,
+          f"feed consensus is not downgraded by engines ({putty.verdict()})")
+    check(putty.confidence() == core.CAMPAIGN_ONLY_CONFIDENCE,
+          f"campaign-only confidence kept ({putty.confidence()})")
+
+    # A real determination survives a clean sweep next to it.
+    eicar = report(ha_result("malicious", 100, **one_bad),
+                   core.SourceResult(source="malwarebazaar", status="found",
+                                     verdict=core.VERDICT_MALICIOUS,
+                                     note="EICAR-Test-File"))
+    check(eicar.verdict() == core.VERDICT_MALICIOUS,
+          f"direct determination stays malicious ({eicar.verdict()})")
+
+    # One scanner is not enough to call a sweep; the suspicion stands.
+    weak = report(ha_result("suspicious", 60, **one_clean),
+                  otx(core.VERDICT_SUSPICIOUS))
+    check(not weak.engine_cleared(), "0/1 scanner does not clear")
+    check(weak.verdict() == core.VERDICT_SUSPICIOUS,
+          f"thin engine evidence keeps suspicion ({weak.verdict()})")
+
+    # A sandbox that never produced scanner data cannot clear anything.
+    blind = report(ha_result("suspicious", 60), otx(core.VERDICT_SUSPICIOUS))
+    check(not blind.engine_cleared(), "no scanners -> not cleared")
+    check(blind.verdict() == core.VERDICT_SUSPICIOUS,
+          f"no scanner data keeps suspicion ({blind.verdict()})")
+
+
 def live(skip: bool) -> None:
     from threattrove import Engine, Store, ALL_SOURCES
     import tempfile
@@ -273,5 +353,6 @@ if __name__ == "__main__":
     verdicts()
     report_view()
     sandbox_ha()
+    engine_clearance()
     live("--offline" in sys.argv)
     print("\nall checks passed")

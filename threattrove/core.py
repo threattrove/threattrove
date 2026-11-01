@@ -22,7 +22,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
 
-VERSION = "2.1.2"
+VERSION = "2.1.3"
 
 DEFAULT_TIMEOUT = float(os.environ.get("TT_TIMEOUT", "20"))
 CACHE_TTL_SECONDS = int(os.environ.get("TT_CACHE_TTL", str(7 * 24 * 3600)))
@@ -86,6 +86,18 @@ DIRECT_SOURCES = frozenset({"malwarebazaar", "virustotal", "hybridanalysis",
 
 #: confidence ceiling for a malicious consensus that no source examined
 CAMPAIGN_ONLY_CONFIDENCE = 45
+
+#: Sources whose ``x/y engines`` figure comes from antivirus engines that
+#: actually scanned the artifact. OTX also reports an engine count, but it is
+#: derived from community analysis, so it can corroborate without voting here.
+ENGINE_SOURCES = frozenset({"virustotal", "hybridanalysis", "triage"})
+
+#: how many engine slots must have reported a clean sweep before that sweep is
+#: allowed to overrule heuristic flags
+ENGINE_CLEARANCE_MIN = 2
+
+#: confidence for a file the engines cleared while heuristics kept flagging it
+ENGINE_CLEARED_CONFIDENCE = 35
 
 #: confidence granted by N corroborating sources (5 or more -> MAX)
 CORROBORATION_CONFIDENCE = {1: 45, 2: 75, 3: 88, 4: 93}
@@ -389,16 +401,28 @@ class Report:
         return sum(self._weights())
 
     def verdict(self) -> str:
-        """Aggregate verdict, requiring one direct look at the file to convict."""
+        """Aggregate verdict, requiring one direct look at the file to convict.
+
+        Malicious needs a direct determination and suspicious needs something
+        that survived the engines: heuristic scores and community chatter about
+        genuine vendor software are the classic false-positive pair, and an
+        engine sweep that found nothing outranks both.
+        """
         verdict = combine(self._weights())[0]
         if verdict == VERDICT_MALICIOUS and not self.direct_evidence():
             return VERDICT_SUSPICIOUS
+        if (verdict == VERDICT_SUSPICIOUS and not self.has_malicious()
+                and self.engine_cleared()):
+            return VERDICT_CLEAN
         return verdict
 
     def confidence(self) -> int:
         verdict, confidence = combine(self._weights())
         if verdict == VERDICT_MALICIOUS and not self.direct_evidence():
             return min(confidence, CAMPAIGN_ONLY_CONFIDENCE)
+        if (verdict == VERDICT_SUSPICIOUS and not self.has_malicious()
+                and self.engine_cleared()):
+            return min(confidence, ENGINE_CLEARED_CONFIDENCE)
         return confidence
 
     # -- presentation helpers -------------------------------------------
@@ -443,6 +467,27 @@ class Report:
         """True when a malicious consensus rests purely on distribution data."""
         return (self.corroboration() >= MIN_CORROBORATION
                 and not self.direct_evidence())
+
+    def has_malicious(self) -> bool:
+        """True when any source lists this indicator as malicious."""
+        return any(r.verdict == VERDICT_MALICIOUS for r in self.results)
+
+    def engine_cleared(self) -> bool:
+        """True when every antivirus engine that scanned the file missed it.
+
+        Only real scan results count (``ENGINE_SOURCES``), and every one of
+        them must report zero detections over at least ``ENGINE_CLEARANCE_MIN``
+        engine slots. This is the veto for heuristic-only suspicion: a sandbox
+        score or a pulse says how a file behaved, an engine sweep says what the
+        file is.
+        """
+        scans = [r for r in self.results
+                 if r.source in ENGINE_SOURCES
+                 and r.status in SCORED_STATUSES
+                 and r.total and (r.detail or {}).get("engines")]
+        if not scans or any(r.detections for r in scans):
+            return False
+        return sum(r.total for r in scans) >= ENGINE_CLEARANCE_MIN
 
     def evidence(self) -> List[Dict[str, Any]]:
         """Group the sources that answered into evidence classes.
@@ -603,6 +648,12 @@ class Report:
             return "Matches a known-good record"
 
         if verdict == VERDICT_CLEAN:
+            weak = sorted({r.source for r in self.results
+                           if r.verdict in (VERDICT_SUSPICIOUS,
+                                            VERDICT_MALICIOUS)})
+            if weak and self.engine_cleared():
+                return (f"0/{tot} engines flagged this - the flags from "
+                        f"{', '.join(weak[:3])} are a weak lead, not a verdict")
             if det == 0 and tot:
                 return f"0/{tot} engines flagged this and no feed lists it"
             return "No source that answered flagged this"
@@ -624,6 +675,7 @@ class Report:
             "corroboration": self.corroboration(),
             "direct_sources": self.direct_evidence(),
             "campaign_only": self.campaign_only(),
+            "engine_cleared": self.engine_cleared(),
             "families": self.families(),
             "evidence": self.evidence(),
             "file_identity": self.file_identity(),
