@@ -22,7 +22,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
 
-VERSION = "2.1.6"
+VERSION = "2.1.7"
 
 DEFAULT_TIMEOUT = float(os.environ.get("TT_TIMEOUT", "20"))
 CACHE_TTL_SECONDS = int(os.environ.get("TT_CACHE_TTL", str(7 * 24 * 3600)))
@@ -737,11 +737,12 @@ class Report:
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS cache (
-    kind       TEXT NOT NULL,
-    value      TEXT NOT NULL,
-    source     TEXT NOT NULL,
-    payload    TEXT NOT NULL,
-    fetched_at REAL NOT NULL,
+    kind          TEXT NOT NULL,
+    value         TEXT NOT NULL,
+    source        TEXT NOT NULL,
+    payload       TEXT NOT NULL,
+    fetched_at    REAL NOT NULL,
+    logic_version INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (kind, value, source)
 );
 CREATE TABLE IF NOT EXISTS local (
@@ -781,19 +782,43 @@ class Store:
         self.conn.execute("PRAGMA synchronous=NORMAL")
         with self._lock:
             self.conn.executescript(SCHEMA)
+            self._migrate()
             self.conn.commit()
+
+    def _migrate(self) -> None:
+        """Bring a database written by an older version up to this schema.
+
+        ``logic_version`` arrived in 2.1.7. Rows that predate it are given 0,
+        which no source declares, so they are never served: an entry cached by
+        an older parser may carry a verdict that logic has since corrected.
+        They are replaced on the next lookup rather than deleted, so the cost is
+        one re-fetch per indicator and the cache refills on its own.
+        """
+        cols = {row[1] for row in self.conn.execute("PRAGMA table_info(cache)")}
+        if "logic_version" not in cols:
+            self.conn.execute(
+                "ALTER TABLE cache ADD COLUMN logic_version INTEGER NOT NULL"
+                " DEFAULT 0")
 
     # -- cache -----------------------------------------------------------
     def get_cached(self, kind: str, value: str, source: str,
-                   ttl: Optional[int] = None) -> Optional[SourceResult]:
+                   ttl: Optional[int] = None,
+                   logic_version: int = 1) -> Optional[SourceResult]:
+        """Return a cached result only if the source logic still matches.
+
+        ``logic_version`` is the version of the code that produced the entry,
+        as declared by the source. A mismatch means the parsing or verdict
+        rules changed after the entry was written, so the entry is ignored and
+        the source is queried again.
+        """
         ttl = CACHE_TTL_SECONDS if ttl is None else ttl
         if ttl <= 0:
             return None
         with self._lock:
             row = self.conn.execute(
                 "SELECT payload, fetched_at FROM cache"
-                " WHERE kind=? AND value=? AND source=?",
-                (kind, value, source),
+                " WHERE kind=? AND value=? AND source=? AND logic_version=?",
+                (kind, value, source, int(logic_version)),
             ).fetchone()
         if not row:
             return None
@@ -809,13 +834,16 @@ class Store:
         res.detail["_cached_at"] = fetched_at
         return res
 
-    def put_cached(self, kind: str, value: str, res: SourceResult) -> None:
+    def put_cached(self, kind: str, value: str, res: SourceResult,
+                   logic_version: int = 1) -> None:
         payload = json.dumps(dataclasses.asdict(res))
         with self._lock:
             self.conn.execute(
-                "INSERT OR REPLACE INTO cache (kind, value, source, payload, fetched_at)"
-                " VALUES (?,?,?,?,?)",
-                (kind, value, res.source, payload, time.time()),
+                "INSERT OR REPLACE INTO cache"
+                " (kind, value, source, payload, fetched_at, logic_version)"
+                " VALUES (?,?,?,?,?,?)",
+                (kind, value, res.source, payload, time.time(),
+                 int(logic_version)),
             )
             self.conn.commit()
 
@@ -972,6 +1000,10 @@ class Source:
     category: str = "reputation"
     min_interval: float = 0.0
     cache_ttl: Optional[int] = None
+    #: Bump when the verdict or parsing rules of this source change. Cached
+    #: entries carrying an older number are ignored, so a corrected verdict
+    #: takes effect on the next lookup instead of up to ``cache_ttl`` later.
+    logic_version: int = 1
 
     def key(self) -> Optional[str]:
         if not self.env_key:
@@ -1125,7 +1157,8 @@ class Engine:
             cached = self.store.get_cached(
                 ind.kind, ind.value, source.name,
                 ttl=source.cache_ttl if source.cache_ttl is not None
-                else CACHE_TTL_SECONDS)
+                else CACHE_TTL_SECONDS,
+                logic_version=source.logic_version)
             if cached:
                 return cached
         self._pace(source)
@@ -1140,7 +1173,8 @@ class Engine:
                 payload["detail"] = {k: v for k, v in (payload["detail"] or {}).items()
                                      if not k.startswith("_")}
                 self.store.put_cached(ind.kind, ind.value,
-                                      SourceResult(**payload))
+                                      SourceResult(**payload),
+                                      logic_version=source.logic_version)
             except sqlite3.Error:
                 pass
         return res

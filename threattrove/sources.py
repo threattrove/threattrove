@@ -158,6 +158,7 @@ class AlienVaultOTXFile(Source):
     keyless = True
     homepage = "https://otx.alienvault.com/"
     kinds = (KIND_HASH,)
+    logic_version = 2       # 2.1.6: no-threat pulses are not counted
 
     def _headers(self) -> Dict[str, str]:
         key = self.key()
@@ -371,6 +372,7 @@ class HybridAnalysis(Source):
     env_key = "HA_API_KEY"
     homepage = "https://www.hybrid-analysis.com/"
     kinds = (KIND_HASH,)
+    logic_version = 2       # 2.1.2/2.1.4: direct evidence rules, generic labels
     min_interval = 0.3      # free tier: 200 requests/minute
 
     API = "https://www.hybrid-analysis.com/api/v2"
@@ -607,6 +609,7 @@ class AlienVaultOTXUrl(Source):
     keyless = True
     homepage = "https://otx.alienvault.com/"
     kinds = (KIND_URL,)
+    logic_version = 2       # 2.1.6: no-threat pulses are not counted
 
     def lookup(self, ind: Indicator) -> SourceResult:
         from urllib.parse import quote
@@ -837,6 +840,7 @@ class AlienVaultOTXDomain(Source):
     keyless = True
     homepage = "https://otx.alienvault.com/"
     kinds = (KIND_DOMAIN, KIND_IP)
+    logic_version = 2       # 2.1.6: no-threat pulses are not counted
 
     def lookup(self, ind: Indicator) -> SourceResult:
         section = "IPv4" if ind.kind == KIND_IP else "domain"

@@ -311,6 +311,30 @@ Copy `deploy/threattrove.env.example` and edit. The important ones:
 | `TT_SITE_NAME` | `ThreatTrove` | brand shown in nav, titles, OG tags |
 | `TT_ENABLE_REVERSE_IP` | *(empty)* | `1` enables reverse-IP |
 
+### Cache invalidation
+
+A cache entry is only reused by the code that wrote it. Every source declares a
+`logic_version` integer; the version is stored alongside the payload, and a
+lookup ignores any entry whose version does not match the source's current one.
+
+That matters because a parser fix and a stale cache can otherwise fight: if a
+source's verdict rules change while entries they produced are still inside
+`TT_CACHE_TTL` (a week by default), the corrected verdict would not be visible
+until each of those entries expired.
+
+* **Upgrading invalidates the cache once.** Databases written before 2.1.7 gain
+the column with the default `0`, which no source declares, so every pre-existing
+entry is ignored and re-fetched on its next lookup. Nothing is deleted: the rows
+are overwritten as they are refreshed, so the cost is one extra upstream request
+per indicator, not a cold cache.
+* **Bumping is a code change, not a config knob.** When you change how a source
+parses a response or decides a verdict, raise its `logic_version` by one in
+`threattrove/sources.py`. Sources that share response-shaping helpers must be
+bumped together. Leaving it alone is the right choice for refactors that cannot
+change an output.
+* **`?fresh=1` and `--no-cache` still work**; they bypass the cache entirely and
+rewrite the entry at the current version.
+
 ---
 
 ## Deployment
@@ -422,7 +446,7 @@ Dockerfile, docker-compose.yml
 ## Testing
 
 ```bash
-.venv/bin/python scripts/smoke.py --offline   # parsing, verdict math, evidence, sandbox, clearance, blocklist import
+.venv/bin/python scripts/smoke.py --offline   # parsing, verdicts, evidence, clearance, blocklist import, cache versions
 .venv/bin/python scripts/smoke.py             # + live hash/URL/domain lookups
 ```
 
@@ -435,6 +459,9 @@ Dockerfile, docker-compose.yml
   single node behind a proxy.
 * Bulk jobs run inside the web worker process. Two workers means two independent
   job pools (fine for this scale; swap in a real queue if you outgrow it).
+* Cached verdicts are not re-derived until an entry expires or its source's
+  `logic_version` changes, so an upstream provider revising its data is picked up
+  on the next `TT_CACHE_TTL` window, not immediately.
 
 ## License
 

@@ -457,6 +457,113 @@ def local_corpus() -> None:
         store.close()
 
 
+def cache_logic() -> None:
+    print("\n[cache logic version]")
+    import dataclasses
+    import json
+    import sqlite3
+    import tempfile
+    import time
+
+    h = "ab" * 32
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "old.db"
+
+        # A cache written before 2.1.7 has no logic_version column at all.
+        stale = core.SourceResult(source="otx", status="found",
+                                  verdict=core.VERDICT_SUSPICIOUS,
+                                  note="pulses counted the old way")
+        conn = sqlite3.connect(db)
+        conn.executescript(
+            "CREATE TABLE cache (kind TEXT NOT NULL, value TEXT NOT NULL,"
+            " source TEXT NOT NULL, payload TEXT NOT NULL,"
+            " fetched_at REAL NOT NULL,"
+            " PRIMARY KEY (kind, value, source));")
+        conn.execute("INSERT INTO cache VALUES (?,?,?,?,?)",
+                     ("hash", h, "otx",
+                      json.dumps(dataclasses.asdict(stale)), time.time()))
+        conn.commit()
+        conn.close()
+
+        store = core.Store(db)
+        cols = {row[1] for row in store.conn.execute("PRAGMA table_info(cache)")}
+        check("logic_version" in cols, "old database gained the column")
+        check(store.get_cached("hash", h, "otx", logic_version=2) is None,
+              "row written by the old rule is not served")
+        check(store.get_cached("hash", h, "otx", logic_version=0) is not None,
+              "it is kept, tagged 0, until the next lookup replaces it")
+
+        # A write only comes back to the code version that made it.
+        fresh = core.SourceResult(source="otx", status="found",
+                                  verdict=core.VERDICT_UNKNOWN,
+                                  note="no-threat pulses ignored")
+        store.put_cached("hash", h, fresh, logic_version=2)
+        got = store.get_cached("hash", h, "otx", logic_version=2)
+        check(got is not None and got.verdict == core.VERDICT_UNKNOWN,
+              "matching logic version -> served")
+        check(bool(got and got.detail.get("_cached")), "marked as cached")
+        check(store.get_cached("hash", h, "otx", logic_version=1) is None,
+              "older logic version -> miss")
+
+        # The engine re-queries only the source that moved.
+        class _Counter(core.Source):
+            name = "counter"
+            display = "Counter"
+            env_key = None
+            kinds = (core.KIND_HASH,)
+            calls = 0
+
+            def lookup(self, ind):
+                type(self).calls += 1
+                return self.result(status="found",
+                                   verdict=core.VERDICT_CLEAN,
+                                   note=f"call {type(self).calls}")
+
+        class _Other(_Counter):
+            name = "other"
+            calls = 0
+
+        eng = core.Engine(sources=[_Counter()], store=store)
+        ind = core.parse_indicator(h)
+        first = eng.lookup(ind).results[0]
+        check(_Counter.calls == 1 and not first.detail.get("_cached"),
+              "first lookup queries the source")
+        second = eng.lookup(ind).results[0]
+        check(_Counter.calls == 1 and second.detail.get("_cached"),
+              "second lookup is served from cache")
+
+        _Counter.logic_version = 2
+        third = eng.lookup(ind).results[0]
+        check(_Counter.calls == 2 and not third.detail.get("_cached"),
+              "bumping logic_version forces a re-query")
+        check(third.verdict == core.VERDICT_CLEAN,
+              f"the fresh verdict is what is served ({third.verdict})")
+        eng.lookup(ind)
+        check(_Counter.calls == 2, "and the new row caches at the new version")
+
+        # Bumping one source must not throw away another source's cache.
+        _Counter.logic_version = 1
+        _Counter.calls = 0
+        h2 = "cd" * 32
+        eng2 = core.Engine(sources=[_Counter(), _Other()], store=store)
+        ind2 = core.parse_indicator(h2)
+        eng2.lookup(ind2)
+        check((_Counter.calls, _Other.calls) == (1, 1),
+              f"two sources, each queried once ({_Counter.calls}, {_Other.calls})")
+        _Other.logic_version = 2
+        res = {r.source: r for r in eng2.lookup(ind2).results}
+        check(_Other.calls == 2, "the bumped source re-queried")
+        check(_Counter.calls == 1 and res["counter"].detail.get("_cached"),
+              "the untouched source stayed cached")
+        store.close()
+
+    # The shipped sources say which of them changed their rules.
+    from threattrove.sources import ALL_SOURCES
+    bumped = sorted(s.name for s in ALL_SOURCES if s.logic_version > 1)
+    check(bumped == ["hybridanalysis", "otx", "otx_domain", "otx_url"],
+          f"sources with corrected verdict logic: {bumped}")
+
+
 def live(skip: bool) -> None:
     from threattrove import Engine, Store, ALL_SOURCES
     import tempfile
@@ -508,5 +615,6 @@ if __name__ == "__main__":
     family_labels()
     otx_pulses()
     local_corpus()
+    cache_logic()
     live("--offline" in sys.argv)
     print("\nall checks passed")
