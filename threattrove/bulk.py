@@ -11,6 +11,7 @@ import csv
 import io
 import json
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -23,10 +24,45 @@ from .core import (
     Indicator,
     Report,
     Store,
+    hash_type,
     parse_indicator,
 )
 
 MAX_ROWS = int(os.environ.get("TT_BULK_MAX", "5000"))
+
+#: characters that separate fields in a feed export
+_FIELD_SPLIT = re.compile(r"[,\;\t\s\"']+")
+
+
+def iter_hash_tokens(path: str | Path, limit: int = 0) -> Iterator[Tuple[str, str]]:
+    """Stream ``(algo, hash)`` pairs from a fetch or blocklist dump.
+
+    Deliberately schema-agnostic: every field of every line is scanned and any
+    md5/sha1/sha256-shaped token is taken, so a header row (which contains no
+    hash), a ``sha256_hash,md5_hash,first_seen`` export, a CSV quoted one value
+    per line, and a plain newline list all parse without a column map. Lines are
+    read one at a time so a multi-million-row file costs no memory.
+    """
+    seen = set()
+    emitted = 0
+    with open(path, "r", encoding="utf-8-sig", errors="replace") as fh:
+        for line in fh:
+            if not line or line[0] == "#":
+                continue
+            for token in _FIELD_SPLIT.split(line.strip()):
+                algo = hash_type(token)
+                if not algo:
+                    continue
+                value = token.strip().lower()
+                if value in seen:
+                    continue
+                seen.add(value)
+                yield algo, value
+                emitted += 1
+                if limit and emitted >= limit:
+                    break
+            if limit and emitted >= limit:
+                break
 
 #: header names we recognise, mapped to the indicator kind they imply
 _HASH_HEADERS = {

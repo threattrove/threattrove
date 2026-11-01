@@ -345,6 +345,78 @@ def family_labels() -> None:
     check("Malware" not in rep.headline(), f"headline clean: {rep.headline()}")
 
 
+def local_corpus() -> None:
+    """Bulk-imported blocklists convict on their own, and parse by shape."""
+    print("\n[local import]")
+    import tempfile
+    from threattrove import bulk
+
+    sha_a = "a" * 64
+    sha_b = "b" * 64
+    sha_c = "c" * 64
+    md5_a = "d" * 32
+    sha1_a = "e" * 40
+
+    # A MalwareBazaar-style export: header row, quoted fields, extra columns,
+    # a duplicate, and hashes of two different widths.
+    raw = (
+        '"sha256_hash","firstseen_utc","file_name","file_type_guess"\n'
+        f'"{sha_a}","2025-01-02 03:04:05","invoice.exe","exe"\n'
+        f'"{md5_a}","2025-01-02 03:04:06","invoice.exe","exe"\n'
+        f'"{sha1_a}","2025-01-02 03:04:07","loader.dll","dll"\n'
+        f'"{sha_a}","2025-01-03 00:00:00","invoice.exe","exe"\n'
+        "not-a-hash,whatever\n"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        csv_path = Path(tmp) / "full.csv"
+        csv_path.write_text(raw, encoding="utf-8")
+
+        parsed = list(bulk.iter_hash_tokens(csv_path))
+        algos = sorted(a for a, _ in parsed)
+        check(len(parsed) == 3, f"header skipped and duplicate dropped ({len(parsed)})")
+        check(algos == ["md5", "sha1", "sha256"], f"widths detected ({algos})")
+        check(len(list(bulk.iter_hash_tokens(csv_path, limit=2))) == 2,
+              "limit honoured")
+
+        # Import twice: the first pass inserts, the second only relabels.
+        store = core.Store(Path(tmp) / "t.db")
+        inserted, updated = store.add_local_many(
+            [("hash", h) for _, h in parsed], label="malware",
+            note="imported from full.csv")
+        check((inserted, updated) == (3, 0), f"first import inserts ({inserted}/{updated})")
+
+        inserted, updated = store.add_local_many(
+            [("hash", sha_a)], label="malware", note="re-import")
+        check((inserted, updated) == (0, 1), f"re-import updates ({inserted}/{updated})")
+        check(store.count_local_in("hash", [sha_a, sha_b]) == 1,
+              "count_local_in counts only stored values")
+
+        # The operator's own verdict needs no second source.
+        eng = core.Engine(sources=[], store=store)
+        rep = eng.lookup(core.parse_indicator(sha_a))
+        check(rep.verdict() == core.VERDICT_MALICIOUS,
+              f"local row convicts alone ({rep.verdict()})")
+        check(rep.confidence() >= core.LOCAL_TRUST_CONFIDENCE,
+              f"confidence lifted ({rep.confidence()})")
+        head = rep.headline()
+        check("local blocklist" in head, f"headline names the corpus: {head}")
+        check("0/0" not in head, f"no empty engine ratio: {head}")
+
+        # A hash that is not in the corpus stays unknown.
+        rep = eng.lookup(core.parse_indicator(sha_b))
+        check(rep.verdict() == core.VERDICT_UNKNOWN, f"miss stays {rep.verdict()}")
+
+        # An allowlist row outranks a feed hit rather than being overruled.
+        store.add_local("hash", sha_c, "clean", "vendor binary")
+        rep = core.Report(indicator=core.parse_indicator(sha_c))
+        rep.results = [core.SourceResult(source="virustotal", status="found",
+                                         verdict=core.VERDICT_MALICIOUS,
+                                         note="1/70 engines flagged")]
+        check(rep.verdict() != core.VERDICT_MALICIOUS,
+              f"allowlist still wins ({rep.verdict()})")
+        store.close()
+
+
 def live(skip: bool) -> None:
     from threattrove import Engine, Store, ALL_SOURCES
     import tempfile
@@ -394,5 +466,6 @@ if __name__ == "__main__":
     sandbox_ha()
     engine_clearance()
     family_labels()
+    local_corpus()
     live("--offline" in sys.argv)
     print("\nall checks passed")

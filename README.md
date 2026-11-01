@@ -89,9 +89,30 @@ threattrove ioc.example --no-cache --timeout 60 --workers 8
 threattrove --add-local 275a021b... --label malware --note "EICAR test file"
 threattrove --list-local
 threattrove --stats
+
+# bulk local corpus: import a whole blocklist into the same table
+threattrove --import-local full.csv --dry-run     # count and sample, write nothing
+threattrove --import-local full.csv --label malware --note "MalwareBazaar"
 ```
 
 Exit codes: `0` success, `1` usage error, `3` `--fail-on-malicious` tripped.
+
+### Importing a blocklist
+
+`--import-local FILE` streams a dump of any shape into the `local` table: a
+MalwareBazaar export with ten columns, a quoted CSV, a newline list of MD5s, or
+a mixed feed. Every field of every line is scanned and any md5/sha1/sha256-shaped
+token is taken, so no column map is needed and a header row is skipped on its own.
+Duplicates collapse by primary key, so re-importing the same file is safe — an
+existing row is replaced (relabelled), not doubled. Writes commit in chunks of
+20,000 rows, which keeps a running web instance responsive and lands around
+15,000 hashes/second.
+
+`--dry-run` is the safe first pass: it reports how many hashes the file contains,
+how many are already stored, how many are new, and prints a sample, without
+touching the database. `--import-limit N` caps a run at the first N hashes when
+you want to spot-check a very large file first. Importing 1.16M SHA256 values
+lands around 140 MB of SQLite — plan disk accordingly.
 
 ---
 
@@ -149,6 +170,7 @@ Each source returns `verdict`, `detections`/`total` (engines), `note` and a raw
 
 | Condition | Verdict |
 | --- | --- |
+| The hash is in your imported local corpus, no allowlist conflict | MALICIOUS, confidence 70+ |
 | 2 or more sources say malicious, at least one examined the file | MALICIOUS |
 | 2 or more sources say malicious, none examined the file | SUSPICIOUS, confidence capped at 45 |
 | 1 source says malicious (no allowlist conflict) | SUSPICIOUS |
@@ -185,7 +207,11 @@ reports zero detections over at least two engine slots, heuristic-only
 suspicion (a sandbox behavioural score, an OTX pulse) is demoted to CLEAN with a
 confidence of 35, and the headline names the sources that still flag it. A
 conviction is never erased by a clean sweep, and a single scanner is not enough
-to call a sweep.
+to call a sweep. **Operator corpus**: a local row you imported or added yourself
+is a decision about that exact file made by the instance's owner, not a
+third-party feed's guess, so it convicts without waiting for a second source and
+reads `Listed in your local blocklist`. An allowlist row still outranks a feed
+hit, and a local row never overrides a conflicting allowlist into MALICIOUS.
 
 Every report also carries an **evidence breakdown** (`evidence` in the JSON,
 an evidence strip on the result page) that groups the sources that answered into
@@ -356,7 +382,7 @@ Dockerfile, docker-compose.yml
 ## Testing
 
 ```bash
-.venv/bin/python scripts/smoke.py --offline   # parsing, verdict math, evidence, sandbox, clearance
+.venv/bin/python scripts/smoke.py --offline   # parsing, verdict math, evidence, sandbox, clearance, blocklist import
 .venv/bin/python scripts/smoke.py             # + live hash/URL/domain lookups
 ```
 

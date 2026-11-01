@@ -170,6 +170,14 @@ def build_parser() -> argparse.ArgumentParser:
     loc.add_argument("--label", default="malware",
                      help="label for --add-local (default: malware)")
     loc.add_argument("--note", default="", help="note for --add-local")
+    loc.add_argument("--import-local", metavar="FILE",
+                     help="import every hash found in FILE (CSV/TSV/text) into "
+                          "the local database")
+    loc.add_argument("--import-limit", type=int, default=0, metavar="N",
+                     help="import at most N hashes from --import-local")
+    loc.add_argument("--dry-run", action="store_true",
+                     help="with --import-local: report what would change, "
+                          "write nothing")
     loc.add_argument("--list-local", action="store_true",
                      help="list local database entries and exit")
     loc.add_argument("--delete-local", metavar="VALUE",
@@ -579,6 +587,71 @@ def cmd_list_local(store: Store) -> int:
     return EXIT_OK
 
 
+def cmd_import_local(store: Store, path: str, label: str, note: str,
+                     limit: int = 0, dry_run: bool = False) -> int:
+    """Load a hash dump into the local corpus, streaming and chunk-committed."""
+    from .bulk import iter_hash_tokens
+
+    src = Path(path)
+    if not src.is_file():
+        print(f"no such file: {path}", file=sys.stderr)
+        return EXIT_USAGE
+
+    counts: Dict[str, int] = {"md5": 0, "sha1": 0, "sha256": 0}
+    total = 0
+    t0 = time.time()
+
+    if dry_run:
+        # Membership check only: report the delta without writing anything.
+        buf: List[str] = []
+        already = 0
+        for algo, value in iter_hash_tokens(src, limit=limit):
+            counts[algo] = counts.get(algo, 0) + 1
+            total += 1
+            buf.append(value)
+            if len(buf) >= 5000:
+                already += store.count_local_in("hash", buf)
+                buf = []
+        if buf:
+            already += store.count_local_in("hash", buf)
+        print(c(f"dry run: {src.name}", "bold"))
+        _print_import_counts(counts, total, time.time() - t0)
+        print(f"  already stored     {already}")
+        print(f"  would insert       {total - already}")
+        print(c("  nothing written", "grey"))
+        return EXIT_OK
+
+    def pairs() -> Iterable[Tuple[str, str]]:
+        nonlocal total
+        for algo, value in iter_hash_tokens(src, limit=limit):
+            counts[algo] = counts.get(algo, 0) + 1
+            total += 1
+            yield "hash", value
+
+    inserted, updated = store.add_local_many(pairs(), label, note)
+    elapsed = time.time() - t0
+    print(c(f"imported {src.name}", "bold"))
+    _print_import_counts(counts, total, elapsed)
+    print(f"  inserted           {inserted}")
+    print(f"  already present    {updated}")
+    print(f"  label              {label}")
+    if total:
+        print(c(f"  {total / elapsed:,.0f} hashes/s", "grey"))
+    if label.lower() in ("malware", "malicious", "bad", "block"):
+        print(c("  note: local rows are direct file evidence, so each one "
+                "convicts on its own", "grey"))
+    return EXIT_OK
+
+
+def _print_import_counts(counts: Dict[str, int], total: int,
+                         elapsed: float) -> None:
+    print(f"  hashes found       {total}")
+    for algo in ("sha256", "sha1", "md5"):
+        if counts.get(algo):
+            print(f"    {algo:<16} {counts[algo]}")
+    print(f"  parse time         {elapsed:.1f}s")
+
+
 def cmd_stats(store: Store) -> int:
     st = store.stats()
     print(c("threattrove store", "bold"))
@@ -622,6 +695,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cmd_list_local(store)
         if args.stats:
             return cmd_stats(store)
+        if args.import_local:
+            note = args.note or f"imported from {Path(args.import_local).name}"
+            return cmd_import_local(store, args.import_local, args.label, note,
+                                    max(0, args.import_limit), args.dry_run)
 
         indicators, rejected = collect(args)
         for bad in rejected[:10]:

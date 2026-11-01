@@ -22,7 +22,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
 
-VERSION = "2.1.4"
+VERSION = "2.1.5"
 
 DEFAULT_TIMEOUT = float(os.environ.get("TT_TIMEOUT", "20"))
 CACHE_TTL_SECONDS = int(os.environ.get("TT_CACHE_TTL", str(7 * 24 * 3600)))
@@ -109,6 +109,10 @@ ENGINE_CLEARANCE_MIN = 2
 
 #: confidence for a file the engines cleared while heuristics kept flagging it
 ENGINE_CLEARED_CONFIDENCE = 35
+
+#: floor for a verdict that rests on the operator's own corpus, which is a
+#: first-hand decision rather than an unconfirmed feed hit
+LOCAL_TRUST_CONFIDENCE = 70
 
 #: confidence granted by N corroborating sources (5 or more -> MAX)
 CORROBORATION_CONFIDENCE = {1: 45, 2: 75, 3: 88, 4: 93}
@@ -420,6 +424,9 @@ class Report:
         engine sweep that found nothing outranks both.
         """
         verdict = combine(self._weights())[0]
+        if self.trusted_determination() and verdict in (VERDICT_SUSPICIOUS,
+                                                        VERDICT_MALICIOUS):
+            return VERDICT_MALICIOUS
         if verdict == VERDICT_MALICIOUS and not self.direct_evidence():
             return VERDICT_SUSPICIOUS
         if (verdict == VERDICT_SUSPICIOUS and not self.has_malicious()
@@ -429,6 +436,8 @@ class Report:
 
     def confidence(self) -> int:
         verdict, confidence = combine(self._weights())
+        if self.trusted_determination():
+            return max(confidence, LOCAL_TRUST_CONFIDENCE)
         if verdict == VERDICT_MALICIOUS and not self.direct_evidence():
             return min(confidence, CAMPAIGN_ONLY_CONFIDENCE)
         if (verdict == VERDICT_SUSPICIOUS and not self.has_malicious()
@@ -478,6 +487,16 @@ class Report:
         """True when a malicious consensus rests purely on distribution data."""
         return (self.corroboration() >= MIN_CORROBORATION
                 and not self.direct_evidence())
+
+    def trusted_determination(self) -> bool:
+        """True when the operator's own corpus lists this as malicious.
+
+        A local row is a decision this instance's owner made about this exact
+        file, not a third-party feed's guess, so it does not need a second
+        source to corroborate it. An allowlist conflict still wins.
+        """
+        return any(r.source == "local" and r.status in SCORED_STATUSES
+                   and r.verdict == VERDICT_MALICIOUS for r in self.results)
 
     def has_malicious(self) -> bool:
         """True when any source lists this indicator as malicious."""
@@ -616,7 +635,17 @@ class Report:
         name = ident.get("name", "")
 
         if verdict == VERDICT_MALICIOUS:
-            if sources >= MIN_CORROBORATION:
+            if self.trusted_determination():
+                text = "Listed in your local blocklist"
+                other = sorted({r.source for r in self.results
+                                if r.source != "local"
+                                and r.status in SCORED_STATUSES
+                                and r.verdict == VERDICT_MALICIOUS})
+                if other:
+                    text += f", also listed by {', '.join(other[:3])}"
+                if det and tot:
+                    text += f" ({det}/{tot} engines agree)"
+            elif sources >= MIN_CORROBORATION:
                 text = f"Listed as malicious by {sources} independent sources"
                 if det and tot:
                     text += f", and {det}/{tot} engines agree"
@@ -818,6 +847,50 @@ class Store:
                 (kind, value.lower(), label, note, time.time()),
             )
             self.conn.commit()
+
+    def add_local_many(self, pairs: Iterable[Tuple[str, str]], label: str,
+                       note: str = "", chunk_size: int = 20000) -> Tuple[int, int]:
+        """Import many ``(kind, value)`` pairs, one transaction per chunk.
+
+        Returns ``(inserted, updated)``. Chunked commits keep the write lock
+        short so a running web instance stays responsive during a large import.
+        """
+        sql = ("INSERT OR REPLACE INTO local (kind, value, label, note, added_at)"
+               " VALUES (?,?,?,?,?)")
+        now = time.time()
+        with self._lock:
+            before = self.conn.execute("SELECT COUNT(*) FROM local").fetchone()[0]
+        total = 0
+        buf: List[Tuple[str, str, str, str, float]] = []
+        for kind, value in pairs:
+            buf.append((kind, (value or "").lower(), label, note, now))
+            total += 1
+            if len(buf) >= chunk_size:
+                with self._lock:
+                    self.conn.executemany(sql, buf)
+                    self.conn.commit()
+                buf = []
+        if buf:
+            with self._lock:
+                self.conn.executemany(sql, buf)
+                self.conn.commit()
+        with self._lock:
+            after = self.conn.execute("SELECT COUNT(*) FROM local").fetchone()[0]
+        inserted = after - before
+        return inserted, total - inserted
+
+    def count_local_in(self, kind: str, values: Sequence[str]) -> int:
+        """How many of *values* are already stored for *kind*."""
+        found = 0
+        vals = list(values)
+        with self._lock:
+            for i in range(0, len(vals), 400):
+                chunk = vals[i:i + 400]
+                marks = ",".join("?" * len(chunk))
+                found += self.conn.execute(
+                    f"SELECT COUNT(*) FROM local WHERE kind=? AND value IN ({marks})",
+                    (kind, *chunk)).fetchone()[0]
+        return found
 
     def delete_local(self, kind: str, value: str) -> int:
         with self._lock:
