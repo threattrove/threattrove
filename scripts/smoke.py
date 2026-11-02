@@ -199,7 +199,8 @@ def decision_view() -> None:
     # three sources spread over two classes is a different claim from three
     # blocklists echoing one another.
     check(dec["summary"] ==
-          "3 sources across 2 evidence classes agree it is malicious",
+          "3 independent authorities across 2 evidence classes agree it is "
+          "malicious",
           f"lead quantifies breadth, not just the count ({dec['summary']})")
 
     # Two feeds are a conviction on their own; losing either must be modelled as
@@ -213,7 +214,8 @@ def decision_view() -> None:
     check(piv[0]["confidence"] < pair.confidence(),
           "the predicted confidence is lower than today's")
     pair_dec = pair.decision()
-    check("2 sources across 1 evidence class " in pair_dec["summary"],
+    check("2 independent authorities across 1 evidence class "
+          in pair_dec["summary"],
           f"two feeds in one class read as narrow ({pair_dec['summary']})")
     check("classess" not in pair_dec["summary"], "singular plural is spelled")
 

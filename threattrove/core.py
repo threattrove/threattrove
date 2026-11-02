@@ -22,7 +22,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
 
-VERSION = "2.3.0"
+VERSION = "2.4.0"
 
 DEFAULT_TIMEOUT = float(os.environ.get("TT_TIMEOUT", "20"))
 CACHE_TTL_SECONDS = int(os.environ.get("TT_CACHE_TTL", str(7 * 24 * 3600)))
@@ -74,6 +74,39 @@ SCORED_STATUSES = {"found", "not_found", "matched", "no_match"}
 #: independent sources that must list an indicator as malicious before it is
 #: reported as malicious. A lone hit is a lead, not a conviction.
 MIN_CORROBORATION = 2
+
+#: Rows that come from the same authority are one opinion, however many rows
+#: there are. Two VirusTotal or Hybrid Analysis panels reading the same vendor
+#: corpus can agree all day without telling you more than one panel did, and
+#: URLhaus answering for a payload and for a URL is one feed answering twice.
+#: Corroboration therefore counts authorities, not rows: ``MIN_CORROBORATION``
+#: authorities must name the indicator malicious before it is reported so.
+ENGINE_PANEL_AUTHORITY = "engine-panel"
+
+AUTHORITY_ALIASES: Dict[str, str] = {
+    "virustotal": ENGINE_PANEL_AUTHORITY,
+    "virustotal_url": ENGINE_PANEL_AUTHORITY,
+    "virustotal_domain": ENGINE_PANEL_AUTHORITY,
+    "hybridanalysis": ENGINE_PANEL_AUTHORITY,
+    "triage": ENGINE_PANEL_AUTHORITY,
+    "urlhaus": "urlhaus",
+    "urlhaus_url": "urlhaus",
+    "otx": "otx",
+    "otx_url": "otx",
+    "otx_domain": "otx",
+}
+
+
+def evidence_authority(source: str) -> str:
+    """The authority behind a source row: who is actually making the claim.
+
+    Rows published by one provider for different indicator kinds, or by one
+    engine panel, collapse onto a single authority. Anything not listed stands
+    for itself.
+    """
+    if source in ENGINE_SOURCES:
+        return ENGINE_PANEL_AUTHORITY
+    return AUTHORITY_ALIASES.get(source, source)
 
 #: Sources whose "malicious" verdict means the file itself was examined: a
 #: sample repository that has the artifact, an engine scan, a sandbox run, or a
@@ -586,6 +619,12 @@ class Report:
         if self.trusted_determination() and verdict in (VERDICT_SUSPICIOUS,
                                                         VERDICT_MALICIOUS):
             return VERDICT_MALICIOUS
+        if (verdict == VERDICT_MALICIOUS
+                and self.corroboration() < MIN_CORROBORATION):
+            # Two rows from one authority are one opinion, however loud: a
+            # second engine panel or a feed's own second endpoint does not
+            # turn a lone hit into a conviction.
+            return VERDICT_SUSPICIOUS
         if verdict == VERDICT_MALICIOUS and not self.direct_evidence():
             return VERDICT_SUSPICIOUS
         if (verdict == VERDICT_SUSPICIOUS and not self.has_malicious()
@@ -628,8 +667,21 @@ class Report:
                 if r.verdict in (VERDICT_MALICIOUS, VERDICT_SUSPICIOUS)]
 
     def corroboration(self) -> int:
-        """How many independent sources list this indicator as malicious."""
-        return len({r.source for r in self.results
+        """How many independent authorities list this indicator as malicious.
+
+        Rows are collapsed onto the authority that published them, so a panel
+        that answers for two endpoints, or a feed that answers for both a
+        payload and a URL, counts once. Agreement between two rows of the same
+        authority is one opinion repeated, not corroboration.
+        """
+        return len({evidence_authority(r.source) for r in self.results
+                    if r.category == "reputation"
+                    and r.status in SCORED_STATUSES
+                    and r.verdict == VERDICT_MALICIOUS})
+
+    def corroboration_classes(self) -> int:
+        """How many evidence classes carry a malicious vote."""
+        return len({evidence_class(r.source)[0] for r in self.results
                     if r.category == "reputation"
                     and r.status in SCORED_STATUSES
                     and r.verdict == VERDICT_MALICIOUS})
@@ -978,12 +1030,12 @@ class Report:
 
         # Only classes that carried a malicious vote count toward the breadth
         # claim; a class that merely abstained or hedged did not agree to it.
-        classes_hit = len({row["key"] for row in rows
-                           if any(v["verdict"] == VERDICT_MALICIOUS
-                                  for v in row["verdicts"])})
+        classes_hit = self.corroboration_classes()
         summary = {
             VERDICT_MALICIOUS: (
-                f"{self.corroboration()} sources across {classes_hit} evidence "
+                f"{self.corroboration()} independent "
+                f"{'authority' if self.corroboration() == 1 else 'authorities'} "
+                f"across {classes_hit} evidence "
                 f"class{'' if classes_hit == 1 else 'es'} agree it is malicious"
                 if classes_hit else "Independent sources agree it is malicious"),
             VERDICT_SUSPICIOUS: "Flagged, but not enough to convict",
@@ -1541,6 +1593,62 @@ _thread_local = threading.local()
 
 
 # --------------------------------------------------------------------------
+# Pacing
+# --------------------------------------------------------------------------
+
+#: A provider rate limit belongs to the API key, not to the source class that
+#: spent it, and not to the Engine instance that happened to run it. One web
+#: worker serving two lookups at once, or a hash lookup and a URL lookup in the
+#: same minute, all draw on the same allowance, so the pacing state lives at
+#: module level keyed by ``quota_key`` and is shared by every thread.
+_PACE_LOCK = threading.Lock()
+_PACE_NEXT: Dict[str, float] = {}
+
+#: How long a caller will wait for its turn before giving up. Pacing is meant to
+#: spread calls out, not to make somebody stare at a spinner: past this the
+#: source reports that it was held back and the next lookup tries again.
+PACE_MAX_WAIT = float(os.environ.get("TT_PACE_MAX_WAIT", "3"))
+
+
+def pace_slot(key: str, interval: float,
+              max_wait: Optional[float] = None) -> bool:
+    """Claim the next call slot on ``key``, or refuse if the wait is too long.
+
+    Returns ``True`` when the caller may make its request now, ``False`` when
+    the provider would only be hammered. ``interval`` is the minimum spacing
+    between calls on that key.
+    """
+    if interval <= 0:
+        return True
+    budget = PACE_MAX_WAIT if max_wait is None else max_wait
+    while True:
+        with _PACE_LOCK:
+            now = time.time()
+            ready = _PACE_NEXT.get(key, 0.0)
+            if ready <= now:
+                _PACE_NEXT[key] = now + interval
+                return True
+            wait = ready - now
+        if wait > budget:
+            return False
+        time.sleep(min(wait, 0.25))
+
+
+def pace_defer(key: str, seconds: float) -> None:
+    """Hold every caller on ``key`` back for ``seconds`` (a 429 said so)."""
+    if not key or seconds <= 0:
+        return
+    with _PACE_LOCK:
+        _PACE_NEXT[key] = max(_PACE_NEXT.get(key, 0.0), time.time() + seconds)
+
+
+def pace_wait_hint(key: str) -> float:
+    """Seconds still to wait on ``key``, for an honest note to the user."""
+    with _PACE_LOCK:
+        return max(0.0, _PACE_NEXT.get(key, 0.0) - time.time())
+
+
+# --------------------------------------------------------------------------
 # Engine
 # --------------------------------------------------------------------------
 
@@ -1571,17 +1679,14 @@ class Engine:
                 if s.supports(kind) and not s.available()]
 
     # -- pacing -----------------------------------------------------------
-    def _pace(self, source: Source) -> None:
-        if source.min_interval <= 0:
-            return
-        while True:
-            with self._pace_lock:
-                last = self._last_call.get(source.name, 0.0)
-                wait = source.min_interval - (time.time() - last)
-                if wait <= 0:
-                    self._last_call[source.name] = time.time()
-                    return
-            time.sleep(min(wait, 0.5))
+    def _pace(self, source: Source) -> bool:
+        """Claim this source's rate-limit slot; ``False`` means held back.
+
+        The slot is keyed by provider quota, so the three VirusTotal endpoints
+        spend one body of rate limit rather than three.
+        """
+        key = source.quota_key or source.name
+        return pace_slot(key, source.min_interval)
 
     # -- the lookup -------------------------------------------------------
     def lookup(self, ind: Indicator, use_cache: Optional[bool] = None) -> Report:
@@ -1672,7 +1777,13 @@ class Engine:
             if not allowed:
                 return self._quota_exhausted(source, limit)
 
-        self._pace(source)
+        if not self._pace(source):
+            key = source.quota_key or source.name
+            return source.result(
+                status="skipped",
+                note=(f"held back to stay inside the {key} rate limit "
+                      f"({pace_wait_hint(key):.0f}s), not asked"),
+                detail={"paced": key})
         try:
             res = source.lookup(ind)
         except requests.RequestException as exc:

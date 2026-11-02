@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import datetime as _dt
 import json
+import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -33,6 +34,7 @@ from .core import (
     Source,
     SourceResult,
     DEFAULT_TIMEOUT,
+    pace_defer,
     registrable_domain,
 )
 
@@ -311,6 +313,14 @@ class URLhausPayload(Source):
 VT_DAILY_BUDGET = 400
 VT_BUDGET_ENV = "TT_VT_DAILY_BUDGET"
 
+#: The same free key also allows 4 requests a minute, which a day's budget does
+#: nothing to prevent: three quick lookups can burn the minute and leave the
+#: fourth with a 429. Fifteen seconds between calls keeps a free key under that
+#: ceiling without ever making a lookup wait long; a premium key raises it with
+#: ``TT_VT_MIN_INTERVAL=0``.
+VT_MIN_INTERVAL = 15.0
+VT_MIN_INTERVAL_ENV = "TT_VT_MIN_INTERVAL"
+
 
 class _VirusTotalQuota:
     """Everything the three VirusTotal sources share: one key, one allowance."""
@@ -320,6 +330,17 @@ class _VirusTotalQuota:
     quota_key = "virustotal"
     daily_budget = VT_DAILY_BUDGET
     budget_env = VT_BUDGET_ENV
+
+    @property
+    def min_interval(self) -> float:
+        """Seconds between VirusTotal calls, shared by all three endpoints."""
+        raw = os.environ.get(VT_MIN_INTERVAL_ENV, "").strip()
+        if not raw:
+            return VT_MIN_INTERVAL
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            return VT_MIN_INTERVAL
 
 
 class VirusTotalFile(_VirusTotalQuota, Source):
@@ -1133,6 +1154,17 @@ def _vt_floor(total: int) -> int:
     return max(VT_MIN_ENGINES, int(round(total * VT_MIN_SHARE)))
 
 
+def _retry_after(r: requests.Response, default: float = 60.0) -> float:
+    """Seconds a 429 response asks us to wait, from its ``Retry-After``."""
+    raw = str((getattr(r, "headers", None) or {}).get("Retry-After") or "").strip()
+    if raw:
+        try:
+            return max(1.0, float(raw))
+        except ValueError:
+            pass
+    return default
+
+
 def _vt_error_text(r: requests.Response) -> str:
     """The ``error.message`` of a VirusTotal response, or "" when absent."""
     try:
@@ -1161,6 +1193,10 @@ def _vt_parse(source: Source, r: requests.Response, file_hash: str = "",
             return source.result(
                 status="error",
                 note="daily quota exceeded (free key: 500/day)")
+        # A per-minute refusal says how long to wait; holding the whole process
+        # back for that long is what stops the next lookup failing the same way.
+        pace_defer(source.quota_key or source.name,
+                   _retry_after(r, default=60.0))
         return source.result(status="error", note="rate limited (free tier: 4/min)")
     if r.status_code != 200:
         return source.result(status="error", note=f"HTTP {r.status_code}")
