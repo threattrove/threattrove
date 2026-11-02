@@ -3,6 +3,19 @@
 {% set v = report.verdict %}
 {% block title %}{{ indicator.value if indicator.value|length < 70 else indicator.value[:67] ~ '…' }} — {{ verdict_label.get(v, v) }} · {{ site_name }}{% endblock %}
 
+{% block og_type %}article{% endblock %}
+{% block twitter_card %}summary_large_image{% endblock %}
+{% block og_title %}{{ defang(indicator.value) }} — {{ verdict_label.get(v, v) }}{% endblock %}
+{% block og_description %}{{ verdict_label.get(v, v) }}{% if report.score and report.score > 0 %} · score {{ report.score }}/100{% endif %} · {{ report.sources_checked }} sources checked. One aggregated verdict instead of a wall of tabs.{% endblock %}
+{% block og_url %}{{ public_base }}{{ url_for('result_page', kind=indicator.kind, v=indicator.value) }}{% endblock %}
+{% block og_extra %}
+  <meta property="og:image" content="{{ public_base }}{{ url_for('card_png', kind=indicator.kind, v=indicator.value) }}">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="ThreatTrove verdict card: {{ defang(indicator.value) }} — {{ verdict_label.get(v, v) }}">
+{% endblock %}
+
 {% block content %}
 <div class="ind-head">
   <span class="ind-kind">{{ indicator.label }}</span>

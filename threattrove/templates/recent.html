@@ -4,7 +4,9 @@
 
 {% block content %}
 <h1>Recent lookups</h1>
-<p class="lead">The last {{ rows|length }} indicators resolved on this instance.</p>
+<p class="lead">The last {{ rows|length }} indicators resolved on this instance.
+  Query strings and fragments are hidden here: they often carry tokens that
+  belong to whoever pasted the link, not to this feed.</p>
 
 <div class="card">
   {% if rows %}
@@ -12,9 +14,14 @@
     <thead><tr><th>Indicator</th><th>Type</th><th>Verdict</th><th>When</th></tr></thead>
     <tbody>
     {% for r in rows %}
+      {% set shown = redact(r.value) %}
       <tr>
         <td class="mono wrap-cell">
+          {% if shown == r.value %}
           <a href="{{ url_for('result_page', kind=r.kind, v=r.value) }}">{{ r.value }}</a>
+          {% else %}
+          <span title="query string and fragment hidden from this public feed">{{ shown }}<span class="note">?…</span></span>
+          {% endif %}
         </td>
         <td class="note">{{ r.kind }}</td>
         <td><span class="tag {{ r.verdict }}">{{ verdict_label.get(r.verdict, r.verdict) }}</span></td>

@@ -9,10 +9,15 @@
     Paste a file hash, URL, domain or IP address. {{ site_name }} queries every
     source it can reach, then folds the answers into one verdict you can act on.
   </p>
+  <p class="hint">
+    Defanged indicators work as typed: <code>hxxp://evil[.]com</code>,
+    <code>evil(.)com</code>, <code>evil[dot]com</code>,
+    <code>1[.]2[.]3[.]4</code>. Nothing is rewritten in what you paste.
+  </p>
 
   <form class="searchbar" action="{{ url_for('search') }}" method="get" role="search">
     <input type="text" name="q" autocomplete="off" spellcheck="false"
-           placeholder="sha256, md5, https://…, example.com, 8.8.8.8"
+           placeholder="sha256, md5, https://…, example.com, hxxp://evil[.]com"
            aria-label="Indicator">
     <button type="submit">Look up</button>
   </form>
@@ -23,6 +28,7 @@
     <button class="chip" data-fill="275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f">EICAR sha256</button>
     <button class="chip" data-fill="https://example.com/login">a URL</button>
     <button class="chip" data-fill="example.com">a domain</button>
+    <button class="chip" data-fill="hxxp://example[.]com/login">a defanged URL</button>
   </div>
 </section>
 
@@ -36,9 +42,14 @@
       </thead>
       <tbody>
         {% for r in recent %}
+        {% set shown = redact(r.value) %}
         <tr>
           <td class="mono wrap-cell">
+            {% if shown == r.value %}
             <a href="{{ url_for('result_page', kind=r.kind, v=r.value) }}">{{ r.value }}</a>
+            {% else %}
+            <span title="query string and fragment hidden from this public feed">{{ shown }}<span class="note">?…</span></span>
+            {% endif %}
           </td>
           <td><span class="tag {{ r.verdict }}">{{ verdict_label.get(r.verdict, r.verdict) }}</span></td>
           <td class="note">{{ rel_time(r.ts) }}</td>

@@ -24,6 +24,7 @@ from .core import (
     Indicator,
     Report,
     Store,
+    extract_indicators,
     hash_type,
     parse_indicator,
 )
@@ -120,23 +121,30 @@ def _dedupe(items: Iterable[Indicator]) -> List[Indicator]:
 
 
 def parse_text(text: str, limit: int = MAX_ROWS) -> Tuple[List[Indicator], int]:
-    """Parse pasted text: one indicator per line, '#' comments ignored."""
+    """Parse pasted text: one indicator per line, '#' comments ignored.
+
+    Defanged indicators (``hxxp://evil[.]com``) parse as-is. A line that is not
+    a bare indicator is treated as prose, so an email body or an analyst report
+    can be pasted whole and every indicator in it is taken.
+    """
     items: List[Indicator] = []
     skipped = 0
     for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        # allow "value,note" rows too
-        candidate = line.split(",")[0].strip() if line.count(",") == 1 else line
-        ind = parse_indicator(candidate) or parse_indicator(line)
-        if ind:
-            items.append(ind)
+        ind = parse_indicator(line)
+        if ind is None and line.count(",") == 1:
+            # allow "value,note" rows too
+            ind = parse_indicator(line.split(",")[0].strip())
+        found = [ind] if ind else extract_indicators(line)
+        if found:
+            items.extend(found)
         else:
             skipped += 1
         if len(items) >= limit:
             break
-    return _dedupe(items), skipped
+    return _dedupe(items)[:limit], skipped
 
 
 def parse_csv_bytes(data: bytes, limit: int = MAX_ROWS,

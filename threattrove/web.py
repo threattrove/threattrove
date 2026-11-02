@@ -15,6 +15,7 @@ import argparse
 import io
 import json
 import os
+import re
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -31,6 +32,7 @@ from flask import (
     url_for,
 )
 
+from . import cards
 from .bulk import (
     MAX_ROWS,
     BulkJobs,
@@ -48,6 +50,7 @@ from .core import (
     Engine,
     Indicator,
     Store,
+    defang,
     parse_indicator,
 )
 from .sources import ALL_SOURCES
@@ -129,8 +132,36 @@ def _rel_time(ts: Optional[float]) -> str:
     return f"{int(delta / 86400)}d ago"
 
 
+_QUERY_RE = re.compile(r"[?#].*$", re.S)
+
+
+def redact(value: str) -> str:
+    """Drop the query string and fragment before an indicator is displayed.
+
+    The recent feeds are public, and query strings routinely carry session
+    tokens, e-mail addresses and order numbers that belong to whoever pasted
+    the link. The scheme, host and path identify the sample; the rest is not
+    ours to republish.
+    """
+    return _QUERY_RE.sub("", value or "")
+
+
 def result_url(ind: Indicator) -> str:
     return url_for("result_page", kind=ind.kind, v=ind.value)
+
+
+def public_base() -> str:
+    """Absolute origin for share links, behind the reverse proxy.
+
+    ``TT_PUBLIC_URL`` wins when it is set; otherwise the proxy's
+    ``X-Forwarded-Proto`` is trusted so unfurlers get https, not http.
+    """
+    base = os.environ.get("TT_PUBLIC_URL", "").strip().rstrip("/")
+    if base:
+        return base
+    proto = (request.headers.get("X-Forwarded-Proto", "").split(",")[0].strip()
+             or request.scheme or "https")
+    return f"{proto}://{request.host}"
 
 
 def _json_report(report: Any, include_results: bool = True) -> Dict[str, Any]:
@@ -232,6 +263,9 @@ def create_app(store: Optional[Store] = None) -> Flask:
             "max_rows": MAX_ROWS,
             "rate_limit": MAX_API_PER_MIN,
             "years": time.strftime("%Y"),
+            "defang": defang,
+            "redact": redact,
+            "public_base": public_base(),
         }
 
     # -- pages ------------------------------------------------------------
@@ -289,6 +323,35 @@ def create_app(store: Optional[Store] = None) -> Flask:
         resp.headers["Cache-Control"] = "no-store"
         resp.headers["X-Robots-Tag"] = "noindex"
         return resp
+
+    @app.get("/card/<kind>.png")
+    def card_png(kind: str) -> Any:
+        """The share image for one indicator: last recorded verdict only.
+
+        Deliberately read-only. An unfurler hitting this route must never start
+        a lookup, both because it would burn provider quota on a bot and
+        because the image has to match what the site actually said.
+        """
+        if kind not in KINDS or not cards.available():
+            abort(404)
+        ind = parse_indicator(request.args.get("v", ""))
+        if ind is None or ind.kind != kind:
+            abort(404)
+
+        rt: Runtime = app.extensions["threattrove"]
+        last = rt.store.last_verdict(ind.kind, ind.value) or {}
+        verdict = last.get("verdict") or VERDICT_UNKNOWN
+        score = last.get("score")
+        try:
+            png = cards.render(ind.kind, ind.value, verdict, score)
+        except Exception:            # noqa: BLE001 - a broken card is a 404, not a 500
+            abort(404)
+
+        resp = make_response(png)
+        resp.headers["Content-Type"] = "image/png"
+        resp.headers["Cache-Control"] = "public, max-age=300"
+        resp.set_etag(f"{ind.kind}-{ind.value}-{verdict}-{score}")
+        return resp.make_conditional(request)
 
     @app.get("/recent")
     def recent_page() -> Any:

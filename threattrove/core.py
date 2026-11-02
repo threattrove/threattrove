@@ -22,7 +22,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
 
-VERSION = "2.2.0"
+VERSION = "2.3.0"
 
 DEFAULT_TIMEOUT = float(os.environ.get("TT_TIMEOUT", "20"))
 CACHE_TTL_SECONDS = int(os.environ.get("TT_CACHE_TTL", str(7 * 24 * 3600)))
@@ -287,6 +287,60 @@ def hashes_for_bytes(data: bytes) -> Dict[str, str]:
 
 
 # --------------------------------------------------------------------------
+# Defanging ("hxxp://evil[.]com")
+# --------------------------------------------------------------------------
+
+#: zero-width / soft-hyphen junk that survives paste from chat, PDF and email
+_INVISIBLE_RE = re.compile("[\u200b\u200c\u200d\u200e\u200f\u2060\ufeff\u00ad]")
+
+#: ordered rewrites; the scheme rule runs last so "hxxp[://]" works in one pass
+_REFANG_SUBSTS: Tuple[Tuple[re.Pattern, str], ...] = (
+    (re.compile(r"\[\s*\.\s*\]|\[\s*dot\s*\]|\(\s*\.\s*\)|\(\s*dot\s*\)"
+                r"|\{\s*\.\s*\}|<\s*dot\s*>|(?<=\w)\s+dot\s+(?=\w)", re.I), "."),
+    (re.compile(r"\[\s*:\s*\]|\[\s*colon\s*\]|\(\s*:\s*\)", re.I), ":"),
+    (re.compile(r"\[\s*/\s*\]|\(\s*/\s*\)|\[\s*slash\s*\]", re.I), "/"),
+    (re.compile(r"\[\s*@\s*\]|\[\s*at\s*\]|\(\s*@\s*\)|\(\s*at\s*\)", re.I), "@"),
+    (re.compile(r"\[\s*_\s*\]", re.I), "_"),
+)
+_REFANG_SCHEME_RE = re.compile(r"\bh(?:xx|\*\*)(p|ps)\b", re.I)
+
+
+_DEFANG_SCHEME_RE = re.compile(r"^(https?)://", re.I)
+
+
+def defang(value: str) -> str:
+    """Render an indicator so it is safe to paste into chat, mail or a ticket.
+
+    ``http://evil.com/x`` becomes ``hxxp://evil[.]com/x``. Used for share cards
+    and anything the operator is likely to forward.
+    """
+    if not value:
+        return ""
+    out, scheme = value, ""
+    m = _DEFANG_SCHEME_RE.match(out)
+    if m:
+        scheme = "hxxps://" if m.group(1).lower() == "https" else "hxxp://"
+        out = out[m.end():]
+    return scheme + out.replace(".", "[.]")
+
+
+def refang(text: str) -> str:
+    """Undo indicator defanging so analysts can paste what they actually have.
+
+    Handles ``hxxp``/``hxxps``, ``[.]``, ``(.)``, ``[dot]``, ``evil dot com``,
+    ``[:]``, ``[at]`` and zero-width characters. Idempotent and safe on plain
+    text: nothing here can turn a non-indicator into one.
+    """
+    if not text:
+        return ""
+    out = _INVISIBLE_RE.sub("", text)
+    for pattern, repl in _REFANG_SUBSTS:
+        out = pattern.sub(repl, out)
+    return _REFANG_SCHEME_RE.sub(
+        lambda m: "https" if m.group(1).lower() == "ps" else "http", out)
+
+
+# --------------------------------------------------------------------------
 # Indicator parsing
 # --------------------------------------------------------------------------
 
@@ -362,6 +416,13 @@ def parse_indicator(text: str) -> Optional[Indicator]:
     if not raw or len(raw) > 2048:
         return None
 
+    normalised = refang(raw)
+    if normalised != raw:
+        ind = parse_indicator(normalised)
+        if ind is not None:
+            ind.raw = raw          # keep what the user actually typed
+        return ind
+
     ht = hash_type(raw)
     if ht:
         v = raw.lower()
@@ -405,6 +466,76 @@ def parse_indicator(text: str) -> Optional[Indicator]:
         return Indicator(kind=KIND_DOMAIN, value=host, raw=raw, host=host,
                          domain=registrable_domain(host))
     return None
+
+
+#: bodies of pasted reports: pull the indicators out of the sentences
+_PROSE_URL_RE = re.compile(r"\b[a-z][a-z0-9+.\-]*://[^\s<>\"')\]}]+", re.I)
+_PROSE_HASH_RE = re.compile(
+    r"(?<![0-9a-f])(?:[0-9a-f]{64}|[0-9a-f]{40}|[0-9a-f]{32})(?![0-9a-f])", re.I)
+_PROSE_IPV4_RE = re.compile(r"(?<![\d.])\d{1,3}(?:\.\d{1,3}){3}(?!\d)")
+_PROSE_DOMAIN_RE = re.compile(
+    r"(?<![\w.\-])(?:[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}(?![a-z0-9\-])",
+    re.I)
+
+#: "report.pdf" in prose is a file name, not a domain
+_FILE_SUFFIXES = {
+    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "json",
+    "csv", "exe", "dll", "sys", "dat", "log", "png", "jpg", "jpeg", "gif",
+    "svg", "html", "htm", "php", "asp", "aspx", "ps1", "bat", "cmd", "vbs",
+    "jar", "msi", "iso", "rtf", "md", "bak", "tmp",
+}
+
+
+def extract_indicators(text: str, limit: int = 200) -> List[Indicator]:
+    """Pull every indicator out of prose: an email body, ticket or report.
+
+    Refangs first, so a defanged paste works as well as a live one. Hosts that
+    a URL already covers are not emitted a second time, so the number of
+    lookups stays close to the number of distinct indicators.
+    """
+    if not text:
+        return []
+    body = refang(text)
+    out: List[Indicator] = []
+    seen = set()
+    covered = set()
+
+    def add(ind: Optional[Indicator]) -> None:
+        if ind is None:
+            return
+        key = (ind.kind, ind.value)
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(ind)
+
+    for m in _PROSE_URL_RE.finditer(body):
+        ind = parse_indicator(m.group(0).rstrip(".,;:!?'\""))
+        if ind is not None and ind.kind == KIND_URL:
+            add(ind)
+            if ind.host:
+                covered.add(ind.host.lower())
+            if ind.domain:
+                covered.add(ind.domain.lower())
+
+    for m in _PROSE_HASH_RE.finditer(body):
+        add(parse_indicator(m.group(0)))
+
+    for m in _PROSE_IPV4_RE.finditer(body):
+        # a sentence period is not part of the address
+        add(parse_indicator(m.group(0).rstrip(".")))
+
+    for m in _PROSE_DOMAIN_RE.finditer(body):
+        host = m.group(0).lower().rstrip(".")
+        if host.rsplit(".", 1)[-1] in _FILE_SUFFIXES:
+            continue
+        if host in covered or registrable_domain(host) in covered:
+            continue
+        add(parse_indicator(host))
+        if len(out) >= limit:
+            break
+
+    return out[:limit]
 
 
 # --------------------------------------------------------------------------
@@ -1271,6 +1402,22 @@ class Store:
             ).fetchall()
         return [{"kind": r[0], "value": r[1], "verdict": r[2], "ts": r[3]}
                 for r in rows]
+
+    def last_verdict(self, kind: str, value: str) -> Optional[Dict[str, Any]]:
+        """The most recent verdict we recorded for one indicator.
+
+        Used by the share-card route, which must never spend provider quota:
+        it reports what a real lookup already decided and nothing else.
+        """
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT verdict, score, ts FROM history"
+                " WHERE kind=? AND value=? ORDER BY ts DESC LIMIT 1",
+                (kind, value),
+            ).fetchone()
+        if not row:
+            return None
+        return {"verdict": row[0], "score": row[1], "ts": row[2]}
 
     def close(self) -> None:
         with self._lock:

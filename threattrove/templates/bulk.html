@@ -9,6 +9,11 @@
   JSON array. Columns are auto-detected, duplicates are dropped, and up to
   {{ max_rows }} indicators run per job.
 </p>
+<p class="hint">
+  Defanged indicators (<code>hxxp://evil[.]com</code>, <code>evil[dot]com</code>)
+  parse as typed, and a pasted email body, ticket or analyst report is searched
+  for indicators rather than rejected.
+</p>
 
 {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
 
@@ -26,7 +31,7 @@
 
       <label class="field" for="indicators">…or paste indicators</label>
       <textarea id="indicators" name="indicators" spellcheck="false"
-                placeholder="44d88612fea8a8f36de82e1278abb02f&#10;https://example.com/login&#10;example.com&#10;# comments are ignored"></textarea>
+                placeholder="44d88612fea8a8f36de82e1278abb02f&#10;hxxp://evil[.]com/payload.exe&#10;example[dot]com&#10;10[.]20[.]30[.]40&#10;# comments are ignored&#10;# or paste a whole email / report here"></textarea>
 
       <div class="row" style="margin-top:14px">
         <div>

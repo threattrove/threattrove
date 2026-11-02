@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "threattrove"
-version = "2.2.0"
+version = "2.3.0"
 description = "Self-hosted reputation lookup for file hashes, URLs, domains and IPs"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -23,6 +23,8 @@ dependencies = [
     "requests>=2.31,<3",
     "flask>=3.0,<4",
     "gunicorn>=21.2,<24",
+    # share cards: /card/<kind>.png renders a 1200x630 verdict image at runtime
+    "Pillow>=10,<12",
 ]
 
 [project.optional-dependencies]

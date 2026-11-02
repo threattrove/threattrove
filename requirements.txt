@@ -2,3 +2,5 @@
 requests>=2.31,<3
 flask>=3.0,<4
 gunicorn>=21.2,<24
+# share cards: /card/<kind>.png renders a 1200x630 verdict image at runtime
+Pillow>=10,<12

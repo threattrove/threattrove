@@ -9,8 +9,12 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
   <meta property="og:site_name" content="{{ site_name }}">
+  <meta property="og:type" content="{% block og_type %}website{% endblock %}">
   <meta property="og:title" content="{% block og_title %}{{ site_name }}{% endblock %}">
-  <meta property="og:description" content="Reputation lookup for file hashes, URLs and domains.">
+  <meta property="og:description" content="{% block og_description %}Reputation lookup for file hashes, URLs and domains.{% endblock %}">
+  <meta property="og:url" content="{% block og_url %}{{ public_base }}{{ request.path }}{% endblock %}">
+  <meta name="twitter:card" content="{% block twitter_card %}summary{% endblock %}">
+  {% block og_extra %}{% endblock %}
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
