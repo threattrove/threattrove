@@ -63,7 +63,7 @@ URLSCAN_API_KEY=...       # urlscan.io (optional, raises limits)
 HA_API_KEY=...            # hybrid-analysis.com
 MALSHARE_API_KEY=...      # malshare.com
 TRIAGE_API_KEY=...        # tria.ge
-GSB_API_KEY=...           # Google Safe Browsing v4
+GSB_API_KEY=...           # Google Safe Browsing v4 (non-commercial use)
 PHISHTANK_APPKEY=...      # phishtank.com</pre>
   <p class="note">
     The free sources (CIRCL hashlookup, AlienVault OTX, urlscan.io search,
@@ -85,6 +85,19 @@ PHISHTANK_APPKEY=...      # phishtank.com</pre>
     (<code>TT_VT_DOMAINS=1</code> turns it on). A stray engine flag on a shared
     IP address or a popular domain says almost nothing, so this endpoint mostly
     buys noise, and the allowance is better spent on files and URLs.
+  </p>
+  <h2>URL blocklists</h2>
+  <p class="note" style="margin-top:0">
+    Google Safe Browsing and PhishTank are blocklists, not clearances. A URL
+    that neither lists is reported as “no match” with no verdict, the same as a
+    source with no key: not being on a list is not a statement that a URL is
+    safe. Safe Browsing's API is licensed for non-commercial use only.
+  </p>
+  <p class="note">
+    PhishTank currently sits behind a Cloudflare challenge that refuses
+    non-browser clients, so in practice it answers “upstream blocks API clients
+    (Cloudflare)” and makes no claim either way. When it does answer, only a
+    record that is both valid and verified counts as phishing.
   </p>
   <h2>Second opinion</h2>
   <p class="note" style="margin-top:0">

@@ -791,12 +791,36 @@ class VirusTotalUrl(_VirusTotalQuota, Source):
         return _vt_parse(self, r, url_value=ind.value)
 
 
+#: Phrases Google uses when the key is fine but the API is not switched on
+#: for its project. Distinguished from a bad key because the fix is a console
+#: click, not a new credential, and the old code reported both as "invalid key".
+_GSB_DISABLED_HINTS = ("has not been used in project", "is disabled",
+                       "SERVICE_DISABLED", "accessNotConfigured")
+
+
+def _gsb_refusal(r: requests.Response) -> Tuple[str, str]:
+    """Translate a refusing Safe Browsing response into ``(status, note)``."""
+    body = ""
+    try:
+        body = (r.text or "")[:400]
+    except Exception:            # a fake or half-read response has no text
+        body = ""
+    if r.status_code == 403 and any(h in body for h in _GSB_DISABLED_HINTS):
+        return "error", "API not enabled for this key's project"
+    if r.status_code in (400, 403):
+        return "unauthorized", "invalid API key"
+    if r.status_code == 429:
+        return "error", "quota exceeded (default 10k lookups/day)"
+    return "error", f"HTTP {r.status_code}"
+
+
 class SafeBrowsing(Source):
     name = "gsb"
     display = "Google Safe Browsing"
     env_key = "GSB_API_KEY"
     homepage = "https://developers.google.com/safe-browsing"
     kinds = (KIND_URL, KIND_DOMAIN)
+    logic_version = 2       # 2.6.0: absence from a blocklist is not a clearance
 
     THREATS = ["MALWARE", "SOCIAL_ENGINEERING", "UNWANTED_SOFTWARE",
                "POTENTIALLY_HARMFUL_APPLICATION"]
@@ -815,19 +839,47 @@ class SafeBrowsing(Source):
         r = self.session().post(
             "https://safebrowsing.googleapis.com/v4/threatMatches:find",
             params={"key": self.key()}, json=body, timeout=DEFAULT_TIMEOUT)
-        if r.status_code in (400, 403):
-            return self.result(status="unauthorized", note="invalid API key")
         if r.status_code != 200:
-            return self.result(status="error", note=f"HTTP {r.status_code}")
+            status, note = _gsb_refusal(r)
+            return self.result(status=status, note=note)
         matches = (r.json() or {}).get("matches") or []
         if not matches:
-            return self.result(status="no_match", verdict=VERDICT_CLEAN,
-                               note="not listed")
+            # Absence from Google's lists is not a clearance. Safe Browsing only
+            # knows what it has crawled and blocked, so an unlisted URL is
+            # "no data", exactly like a keyless source returning nothing. This
+            # used to answer CLEAN, which let a blocklist with no opinion push
+            # a URL towards a clean verdict.
+            return self.result(status="no_match", verdict=VERDICT_UNKNOWN,
+                               note="not on Google's lists")
         kinds = sorted({m.get("threatType", "?") for m in matches})
         return self.result(status="matched", verdict=VERDICT_MALICIOUS,
                            note=", ".join(kinds)[:60],
                            link="https://transparencyreport.google.com/safe-browsing/search",
                            detail={"threat_types": kinds})
+
+
+def _phish_flag(value: Any) -> Optional[bool]:
+    """Read PhishTank's ``y``/``n`` flags, which are strings, not booleans.
+
+    Their JSON returns ``"verified": "y"`` / ``"n"``. ``bool("n")`` is True,
+    so the old truthiness test reported a record PhishTank had explicitly marked
+    invalid **and** unverified as a verified phishing URL. Anything unrecognised
+    returns ``None`` -- an unreadable flag is not a yes.
+    """
+    if isinstance(value, bool):
+        return value
+    text = str(value if value is not None else "").strip().lower()
+    if text in ("y", "yes", "true", "1"):
+        return True
+    if text in ("n", "no", "false", "0", ""):
+        return False
+    return None
+
+
+#: PhishTank sits behind Cloudflare and answers non-browser clients with an
+#: interstitial instead of JSON, valid key or not. Reported as an upstream
+#: block rather than a bad key so nobody goes looking for a credential problem.
+_CF_HINTS = ("just a moment", "cf-mitigated", "attention required")
 
 
 class PhishTank(Source):
@@ -836,6 +888,7 @@ class PhishTank(Source):
     env_key = "PHISHTANK_APPKEY"
     homepage = "https://phishtank.org/"
     kinds = (KIND_URL,)
+    logic_version = 2       # 2.6.0: "n" is not truthy
 
     def lookup(self, ind: Indicator) -> SourceResult:
         r = self.session().post(
@@ -844,23 +897,42 @@ class PhishTank(Source):
                   "app_key": self.key()},
             timeout=DEFAULT_TIMEOUT)
         if r.status_code in (401, 403):
+            body = ""
+            try:
+                body = (r.text or "")[:600].lower()
+            except Exception:
+                body = ""
+            if any(h in body for h in _CF_HINTS):
+                return self.result(status="error",
+                                   note="upstream blocks API clients (Cloudflare)")
             return self.result(status="unauthorized", note="invalid app key")
         if r.status_code != 200:
             return self.result(status="error", note=f"HTTP {r.status_code}")
         try:
             data = r.json().get("results") or {}
-        except ValueError:
+        except (ValueError, AttributeError):
             return self.result(status="error", note="non-JSON response")
         if not data.get("in_database"):
             return self.result(status="no_match")
+
+        valid = _phish_flag(data.get("valid"))
+        verified = _phish_flag(data.get("verified"))
         detail = {"verified": data.get("verified"),
+                  "valid": data.get("valid"),
                   "phish_id": data.get("phish_id"),
-                  "submission_time": data.get("submission_time")}
-        if data.get("valid") and data.get("verified"):
+                  "submission_time": data.get("submitted_at")
+                                    or data.get("submission_time")}
+        link = (f"https://phishtank.org/phish_detail.php?phish_id="
+                f"{data.get('phish_id')}")
+        if valid and verified:
             return self.result(status="matched", verdict=VERDICT_MALICIOUS,
-                               note="verified phishing URL",
-                               link=f"https://phishtank.org/phish_detail.php?phish_id={data.get('phish_id')}",
+                               note="verified phishing URL", link=link,
                                detail=detail)
+        if valid is False or verified is False:
+            # Explicitly withdrawn or never confirmed: listed, but not phishing.
+            return self.result(status="matched", verdict=VERDICT_UNKNOWN,
+                               note="listed but marked invalid or unverified",
+                               link=link, detail=detail)
         return self.result(status="matched", verdict=VERDICT_SUSPICIOUS,
                            note="in database (unverified)",
                            link="https://phishtank.org/", detail=detail)

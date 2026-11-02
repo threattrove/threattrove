@@ -4,7 +4,7 @@
 
 ThreatTrove does the three things most people open VirusTotal for: paste an
 indicator, get a verdict, and see *which* sources said what. It runs keyless out
-of the box (8 sources, no account anywhere) and gets sharper as you add API keys.
+of the box (9 sources, no account anywhere) and gets sharper as you add API keys.
 
 ```
 $ threattrove 44d88612fea8a8f36de82e1278abb02f
@@ -296,7 +296,7 @@ anonymous hash.
 
 ## Sources
 
-21 sources are compiled in; 8 work with no key. `httpx`-free HTTP via `requests`.
+24 sources are compiled in; 9 work with no key. `httpx`-free HTTP via `requests`.
 
 | Source | Kind | Category | Key | Env var |
 | --- | --- | --- | --- | --- |
@@ -354,6 +354,22 @@ Notes:
   `TT_MD_MIN_INTERVAL` (default 7.2s) keep a burst from spending either.
 * Sources without a key are simply skipped and listed as `needs key` in
   `/sources`; they never fail a lookup.
+* Google Safe Browsing is a blocklist, not a clearance. A URL that is not on
+  Google's lists is reported as `no_match` with **no verdict** — the same
+  answer a keyless source gives — because Safe Browsing only knows what it has
+  crawled and blocked. (Until 2.6.0 that answer was `clean`, which let a list
+  with no opinion drag a verdict towards benign.) If the key is valid but the
+  API is not enabled for its project, the `403` is reported as *API not enabled
+  for this key's project* instead of being mistaken for a bad key.
+* Safe Browsing's API is licensed for **non-commercial use only**. An install
+  that sells lookups or carries advertising must move to the Web Risk API.
+* PhishTank's verdict flags are the strings `"y"`/`"n"`, not booleans. Only a
+  record that is both `valid` **and** `verified` is called phishing; a listed
+  record marked invalid or unverified carries no verdict. (Until 2.6.0 `"n"`
+  was truthy, so withdrawn records were reported as verified phishing.)
+  PhishTank also sits behind a Cloudflare challenge that refuses non-browser
+  API clients, so in practice the source answers `error` with *upstream blocks
+  API clients (Cloudflare)* and makes no claim either way.
 * Hybrid Analysis is read through `GET /api/v2/overview/{sha256}`; the older
   `POST /search/hash` was withdrawn in API 2.35.0 and now answers `410 Gone`.
   Its `scanners_v2` results feed the `x/y engines` figure on the result page,
@@ -387,6 +403,9 @@ Copy `deploy/threattrove.env.example` and edit. The important ones:
 | `TT_VT_DAILY_BUDGET` | `400` | VirusTotal requests/day, shared by its three sources |
 | `TT_MD_DAILY_BUDGET` | `800` | MetaDefender requests/day, shared by its three sources |
 | `TT_MD_MIN_INTERVAL` | `7.2` | seconds between MetaDefender calls (500/hour ceiling) |
+
+Both URL-side blocklists (Google Safe Browsing, PhishTank) are keyed and
+optional; without a key they are skipped like any other source.
 
 ### Cache invalidation
 
@@ -528,6 +547,11 @@ Dockerfile, docker-compose.yml
 .venv/bin/python scripts/check_vt_floor.py    # engine-ratio floor (offline)
 .venv/bin/python scripts/check_quota.py       # shared allowance, skipped answers, sources page (offline)
 .venv/bin/python scripts/check_metadefender.py # second engine panel: parsing, floor, quota share (offline; --live adds real calls)
+.venv/bin/python scripts/check_gsb.py         # Safe Browsing and PhishTank: flags, refusals, "no data" (offline; --live adds real calls)
+.venv/bin/python scripts/check_corroboration.py  # authority collapsing and corroboration (offline)
+.venv/bin/python scripts/check_refang.py      # defanged indicators (offline)
+.venv/bin/python scripts/check_cards.py       # evidence cards and page rendering (offline)
+.venv/bin/python scripts/check_privacy.py     # no queried value leaks to the page or logs (offline)
 ```
 
 ## Limitations

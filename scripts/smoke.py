@@ -664,8 +664,11 @@ def cache_logic() -> None:
     # The shipped sources say which of them changed their rules.
     from threattrove.sources import ALL_SOURCES
     bumped = sorted(s.name for s in ALL_SOURCES if s.logic_version > 1)
-    check(bumped == ["hybridanalysis", "otx", "otx_domain", "otx_url",
-                     "virustotal", "virustotal_domain", "virustotal_url"],
+    # 2.6.0 adds gsb (an unlisted URL is no data, not a clearance) and
+    # phishtank ("n" is not a truthy flag).
+    check(bumped == ["gsb", "hybridanalysis", "otx", "otx_domain",
+                     "otx_url", "phishtank", "virustotal",
+                     "virustotal_domain", "virustotal_url"],
           f"sources with corrected verdict logic: {bumped}")
 
 
