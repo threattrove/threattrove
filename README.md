@@ -371,6 +371,16 @@ Notes:
   and the skipped answer is not cached, so a lookup gets a real answer again
   tomorrow. `/sources` and `/api/v1/sources` show `used/limit today` for each
   shared allowance.
+* `fresh=1` is the one page view that spends a provider call: it skips the
+  cache and asks every source again. It is rationed per client and per UTC day
+  by `TT_FRESH_PER_DAY` (default 40), counted in the same `quota` table, and it
+  is not honoured at all for a client whose User-Agent declares itself a
+  crawler. A refused `fresh=1` is not an error: the page or the JSON still
+  renders, from cache, and the API says which way it went
+  (`X-ThreatTrove-Fresh: live|denied|cached`). `/robots.txt` keeps crawlers out
+  of `/i/` result pages entirely, because those pages are per-query, already
+  `noindex`, and each one is a live lookup. The provider allowance above is the
+  backstop behind the per-client share.
 * MetaDefender Cloud is the second engine panel. VirusTotal and MetaDefender
   report on different vendor sensors, so their agreement is worth more than one
   panel answering twice — but neither panel can convict alone: both collapse
@@ -433,6 +443,7 @@ Copy `deploy/threattrove.env.example` and edit. The important ones:
 | `TT_MAX_UPLOAD` | `2097152` | upload cap, bytes |
 | `TT_RATE_LIMIT` | `60` | API requests/min per IP |
 | `TT_PAGE_RATE_LIMIT` | `240` | page requests/min per IP |
+| `TT_FRESH_PER_DAY` | `40` | cache-bypassing lookups per IP per day |
 | `TT_SITE_URL` | `https://threattrove.com` | canonical base URL |
 | `TT_SITE_NAME` | `ThreatTrove` | brand shown in nav, titles, OG tags |
 | `TT_ENABLE_REVERSE_IP` | *(empty)* | `1` enables reverse-IP |
@@ -602,6 +613,34 @@ static caching and per-zone rate limits.
 
 ---
 
+### Nightly database backup
+
+The cache, the bulk job records and the 3.5M-row local corpus all live in one
+SQLite file, and nothing else in this deployment is that file. Copying it with
+`cp` can catch it mid-checkpoint; `scripts/backup_db.py` uses SQLite's backup
+API instead, so the snapshot is consistent while the web workers keep reading
+and writing. Each snapshot is checked and gzipped before it is kept.
+
+```bash
+sudo install -D -o threattrove -g threattrove -m 0644 \
+    deploy/threattrove-backup.service /etc/systemd/system/
+sudo install -D -o threattrove -g threattrove -m 0644 \
+    deploy/threattrove-backup.timer /etc/systemd/system/
+sudo mkdir -p /var/backups/threattrove
+sudo chown threattrove:threattrove /var/backups/threattrove
+sudo systemctl daemon-reload
+sudo systemctl enable --now threattrove-backup.timer
+
+sudo systemctl start threattrove-backup.service     # one run now
+journalctl -u threattrove-backup -n 5 --no-pager
+ls -lh /var/backups/threattrove
+```
+
+Every run writes `/var/backups/threattrove/threattrove-<UTCstamp>.db.gz` and
+keeps the last `TT_BACKUP_KEEP` (default 7). A snapshot that fails its check is
+left behind as `.part` and the run exits non-zero, so a broken backup shows up
+in `systemctl --failed` instead of going missing quietly.
+
 ## Project layout
 
 ```
@@ -638,6 +677,7 @@ Dockerfile, docker-compose.yml
 .venv/bin/python scripts/check_status.py      # /local paging and search, source-health states, /status and /api/v1/status (offline)
 .venv/bin/python scripts/check_feodo.py       # Feodo parsing, in-place re-import, local-corpus verdict (offline)
 .venv/bin/python scripts/check_docs.py        # /about, /privacy, /sitemap.xml, /robots.txt (offline)
+.venv/bin/python scripts/check_fresh.py       # fresh=1 rationing, crawler policy, robots (offline)
 ```
 
 ## Limitations

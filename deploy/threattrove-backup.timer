@@ -1,0 +1,16 @@
+[Unit]
+Description=Nightly ThreatTrove database backup
+
+[Timer]
+# One run a night is enough: the cache, the jobs and the local corpus change by
+# import, not by the minute, and seven snapshots cover a bad import discovered
+# within a week. 03:47 is after the 00:17 canary and between hourly refreshes,
+# so the disk does not take a checkpoint and a snapshot at the same time.
+OnCalendar=*-*-* 03:47:00
+RandomizedDelaySec=600
+Persistent=true
+AccuracySec=1min
+Unit=threattrove-backup.service
+
+[Install]
+WantedBy=timers.target

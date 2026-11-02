@@ -1,2 +1,20 @@
 User-agent: *
 Allow: /
+Crawl-delay: 5
+Disallow: /api/v1/bulk
+Disallow: /i/
+Disallow: /*?fresh=1
+Disallow: /*?v=
+
+# Crawlers that re-ask every indicator they find are the reason the daily
+# allowance needs rationing; they get nothing here.
+User-agent: serpstatbot
+Disallow: /
+
+User-agent: SemrushBot
+Disallow: /
+
+User-agent: AhrefsBot
+Disallow: /
+
+Sitemap: https://threattrove.com/sitemap.xml

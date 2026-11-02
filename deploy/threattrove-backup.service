@@ -1,0 +1,36 @@
+[Unit]
+Description=Nightly ThreatTrove database backup
+Documentation=https://threattrove.com
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# The service user, not root: the snapshot has to read the WAL and write next
+# to nothing root owns, and /var/lib/threattrove is threattrove's.
+User=threattrove
+Group=threattrove
+WorkingDirectory=/opt/threattrove
+EnvironmentFile=-/etc/threattrove/threattrove.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/threattrove/.venv/bin/python /opt/threattrove/scripts/backup_db.py
+Nice=15
+IOSchedulingClass=idle
+# 866 MB in, ~100 MB out; an hour is generous and still bounds a stuck run
+TimeoutStartSec=3600
+StandardOutput=journal
+StandardError=journal
+
+# --- hardening -----------------------------------------------------------
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+ReadWritePaths=/var/lib/threattrove /var/backups/threattrove

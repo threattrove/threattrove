@@ -59,6 +59,20 @@ from .sources import ALL_SOURCES
 MAX_UPLOAD_BYTES = int(os.environ.get("TT_MAX_UPLOAD", str(2 * 1024 * 1024)))
 MAX_API_PER_MIN = int(os.environ.get("TT_RATE_LIMIT", "60"))
 MAX_PAGE_PER_MIN = int(os.environ.get("TT_PAGE_RATE_LIMIT", "240"))
+# A cache-bypassing lookup (`fresh=1`) is the only page view that spends a
+# provider call, so it is rationed per client per UTC day. The provider
+# allowance (TT_VT_DAILY_BUDGET) is the global backstop; this is the fair share
+# that stops one crawler from being the only thing the allowance ever answers.
+MAX_FRESH_PER_DAY = int(os.environ.get("TT_FRESH_PER_DAY", "40"))
+
+# A client that declares itself a crawler gets the cached answer and nothing
+# else. No page here is *fresher* for a crawler than for the last person who
+# asked, and a link-follower walking thousands of indicators would spend the
+# day's allowance before any real lookup happened.
+BOT_UA = re.compile(
+    r"(bot|spider|crawl|slurp|scrap|semrush|ahrefs|mj12|dotbot|petalbot"
+    r"|bytespider|headless|phantomjs|facebookexternalhit|go-http-client"
+    r"|python-urllib|libwww|okhttp)", re.I)
 MAX_CONCURRENT_JOBS = int(os.environ.get("TT_MAX_JOBS", "2"))
 
 KINDS = ("hash", "url", "domain", "ip")
@@ -335,6 +349,27 @@ def create_app(store: Optional[Store] = None) -> Flask:
         return (fwd.split(",")[0].strip() if fwd else None) or \
             request.remote_addr or "unknown"
 
+    def is_bot() -> bool:
+        """True when the client declares itself a crawler in its User-Agent."""
+        return bool(BOT_UA.search(request.headers.get("User-Agent", "")))
+
+    def fresh_allowed() -> bool:
+        """Reserve one cache-bypassing lookup for this client today.
+
+        False means "answer from cache": the client is a crawler, or it has
+        already spent its share of the day. It is never an error - the page and
+        the JSON both still render, they just do not re-ask every provider.
+        """
+        if is_bot():
+            return False
+        if runtime.store is None:
+            return True
+        try:
+            return runtime.store.take_quota("fresh:" + client_ip(),
+                                            MAX_FRESH_PER_DAY)
+        except Exception:      # never lose a lookup to a bookkeeping error
+            return True
+
     def api_guard() -> Optional[Any]:
         if not limiter.allow(f"api:{client_ip()}", MAX_API_PER_MIN):
             resp = jsonify({
@@ -411,8 +446,9 @@ def create_app(store: Optional[Store] = None) -> Flask:
             ), 400
 
         rt: Runtime = app.extensions["threattrove"]
-        use_cache = request.args.get("fresh") != "1"
-        report = rt.engine.lookup(ind, use_cache=use_cache)
+        wants_fresh = request.args.get("fresh") == "1"
+        fresh = wants_fresh and fresh_allowed()
+        report = rt.engine.lookup(ind, use_cache=not fresh)
         data = _json_report(report)
 
         resp = make_response(render_template(
@@ -423,6 +459,8 @@ def create_app(store: Optional[Store] = None) -> Flask:
         ))
         resp.headers["Cache-Control"] = "no-store"
         resp.headers["X-Robots-Tag"] = "noindex"
+        if wants_fresh:
+            resp.headers["X-ThreatTrove-Fresh"] = "live" if fresh else "denied"
         return resp
 
     @app.get("/card/<kind>.png")
@@ -499,11 +537,35 @@ def create_app(store: Optional[Store] = None) -> Flask:
 
     @app.get("/robots.txt")
     def robots_txt() -> Any:
-        """Crawler policy: everything the site wants indexed is public."""
-        body = ("User-agent: *\n"
-                "Allow: /\n"
-                "Disallow: /api/v1/bulk\n"
-                f"Sitemap: {canonical_base()}/sitemap.xml\n")
+        """Crawler policy: the documented pages are public, results are not.
+
+        The nine pages in the sitemap are what a crawler may index. A result
+        page is computed per query string, is already `noindex`, and costs a
+        provider call to build, so crawling it produces nothing for the crawler
+        and spends the day's allowance for everyone else.
+        """
+        body = (
+            "User-agent: *\n"
+            "Allow: /\n"
+            "Crawl-delay: 5\n"
+            # Bulk upload needs a request body; a crawler has nothing to send.
+            "Disallow: /api/v1/bulk\n"
+            # Result pages: noindex, per-query, and each one is a live lookup.
+            "Disallow: /i/\n"
+            "Disallow: /*?fresh=1\n"
+            "Disallow: /*?v=\n"
+            "\n"
+            "# Crawlers that re-ask every indicator they find are the reason the\n"
+            "# daily allowance needs rationing; they get nothing here.\n"
+            "User-agent: serpstatbot\n"
+            "Disallow: /\n"
+            "\n"
+            "User-agent: SemrushBot\n"
+            "Disallow: /\n"
+            "\n"
+            "User-agent: AhrefsBot\n"
+            "Disallow: /\n"
+            f"Sitemap: {canonical_base()}/sitemap.xml\n")
         resp = make_response(body, 200)
         resp.mimetype = "text/plain"
         resp.headers["Cache-Control"] = "public, max-age=3600"
@@ -669,11 +731,17 @@ def create_app(store: Optional[Store] = None) -> Flask:
                 "message": f"expected a {expected}, got a {ind.kind}",
             }), 400
         rt: Runtime = app.extensions["threattrove"]
-        fresh = request.args.get("fresh") == "1"
+        wants_fresh = request.args.get("fresh") == "1"
+        fresh = wants_fresh and fresh_allowed()
         report = rt.engine.lookup(ind, use_cache=not fresh)
         resp = jsonify(_json_report(report))
         resp.headers["X-ThreatTrove-Version"] = VERSION
         resp.headers["Cache-Control"] = "public, max-age=60"
+        # `fresh` is a courtesy for a scripted analyst, not a licence to re-ask
+        # every provider; say which way the request actually went.
+        resp.headers["X-ThreatTrove-Fresh"] = (
+            "denied" if wants_fresh and not fresh
+            else "live" if fresh else "cached")
         return resp
 
     @app.get("/api/v1/hash/<value>")
