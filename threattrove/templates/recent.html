@@ -1,17 +1,18 @@
 {% extends "base.html" %}
 
-{% block title %}Recent lookups — {{ site_name }}{% endblock %}
+{% block title %}Recent lookups &mdash; {{ site_name }}{% endblock %}
 
 {% block content %}
 <h1>Recent lookups</h1>
-<p class="lead">The last {{ rows|length }} indicators resolved on this instance.
-  Query strings and fragments are hidden here: they often carry tokens that
-  belong to whoever pasted the link, not to this feed.</p>
+<p class="lead">{{ total }} lookup{{ "" if total == 1 else "s" }} recorded on this
+  instance, newest first, fifty to a page. Fragments and query strings are hidden
+  here: they often carry tokens that belong to whoever pasted the link, not to
+  this feed.</p>
 
 <div class="card">
   {% if rows %}
   <table>
-    <thead><tr><th>Indicator</th><th>Type</th><th>Verdict</th><th>When</th></tr></thead>
+    <thead><tr><th>Indicator</th><th class="nowrap">Type</th><th>Verdict</th><th class="nowrap">When</th></tr></thead>
     <tbody>
     {% for r in rows %}
       {% set shown = redact(r.value) %}
@@ -23,13 +24,25 @@
           <span title="query string and fragment hidden from this public feed">{{ shown }}<span class="note">?…</span></span>
           {% endif %}
         </td>
-        <td class="note">{{ r.kind }}</td>
+        <td class="note nowrap">{{ r.kind }}</td>
         <td><span class="tag {{ r.verdict }}">{{ verdict_label.get(r.verdict, r.verdict) }}</span></td>
-        <td class="note" title="{{ fmt_ts(r.ts) }}">{{ rel_time(r.ts) }}</td>
+        <td class="note nowrap" title="{{ fmt_ts(r.ts) }}">{{ rel_time(r.ts) }}</td>
       </tr>
     {% endfor %}
     </tbody>
   </table>
+  <div class="pager">
+    <span class="pager-info">{{ first }}–{{ last }} of {{ total }}</span>
+    {% if page > 1 %}
+    <a class="btn ghost small" rel="prev"
+       href="{{ url_for('recent_page', page=page-1) }}">&larr; Newer</a>
+    {% endif %}
+    {% if page < pages %}
+    <a class="btn ghost small" rel="next"
+       href="{{ url_for('recent_page', page=page+1) }}">Older &rarr;</a>
+    {% endif %}
+    <span class="pager-page">page {{ page }} / {{ pages }}</span>
+  </div>
   {% else %}
   <div class="empty">Nothing here yet.</div>
   {% endif %}

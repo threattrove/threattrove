@@ -82,6 +82,11 @@ KINDS = ("hash", "url", "domain", "ip")
 #: page never scans the table.
 LOCAL_PER_PAGE = 50
 
+#: Rows per page on /recent. The feed used to render its whole history into one
+#: 83 KB document that reads as a wall of rows and keeps growing; 50 rows is a
+#: screenful, and the pager makes the rest reachable without a 1,000-row page.
+RECENT_PER_PAGE = 50
+
 
 def _int_arg(name: str, default: int) -> int:
     """A positive integer from the query string, or *default*."""
@@ -505,11 +510,33 @@ def create_app(store: Optional[Store] = None) -> Flask:
 
     @app.get("/recent")
     def recent_page() -> Any:
+        """The public lookup feed, one page at a time.
+
+        It used to render every lookup it has ever recorded in a single
+        document, which reads as a wall of rows and grows without bound. The
+        newest page stays indexable; later pages are marked noindex so a crawler
+        does not walk an ever-deepening history, and no response is cached
+        because the next lookup changes it.
+        """
         guard = page_guard()
         if guard:
             return guard
         rt: Runtime = app.extensions["threattrove"]
-        return render_template("recent.html", rows=rt.store.recent(200))
+        total = rt.store.count_recent()
+        pages = max(1, (total + RECENT_PER_PAGE - 1) // RECENT_PER_PAGE)
+        page = min(max(1, _int_arg("page", 1)), pages)
+        rows = rt.store.recent(RECENT_PER_PAGE, offset=(page - 1) * RECENT_PER_PAGE)
+        shown = len(rows)
+        resp = make_response(render_template(
+            "recent.html", rows=rows, total=total, page=page, pages=pages,
+            per_page=RECENT_PER_PAGE,
+            first=(page - 1) * RECENT_PER_PAGE + 1 if shown else 0,
+            last=(page - 1) * RECENT_PER_PAGE + shown,
+        ))
+        resp.headers["Cache-Control"] = "no-store"
+        if page > 1:
+            resp.headers["X-Robots-Tag"] = "noindex, follow"
+        return resp
 
     @app.get("/sources")
     def sources_page() -> Any:

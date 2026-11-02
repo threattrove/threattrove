@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the paged local list and the source-health plumbing.
+"""Check the paged local list, the lookup feed pager and source health.
 
 Run from the repository root::
 
@@ -35,6 +35,7 @@ from threattrove.web import _source_rows, app  # noqa: E402
 
 FAILED = []
 TOTAL = 120
+HISTORY_ROWS = 130
 
 
 def check(cond: bool, msg: str) -> None:
@@ -53,6 +54,18 @@ def seed(store: Store) -> None:
                 " added_at) VALUES (?,?,?,?,?)",
                 ("hash", f"{i:06d}" + "a" * 58, "malware",
                  f"ticket {i}", base + i))
+        store.conn.commit()
+
+
+def seed_history(store: Store) -> None:
+    """History rows for the /recent pager: HISTORY_ROWS, newest last."""
+    base = 1_700_000_000.0
+    with store._lock:                      # noqa: SLF001 - a check may be direct
+        for i in range(HISTORY_ROWS):
+            store.conn.execute(
+                "INSERT INTO history (kind, value, verdict, score, ts)"
+                " VALUES (?,?,?,?,?)",
+                ("domain", f"recent{i:03d}.example", "clean", 0, base + i))
         store.conn.commit()
 
 
@@ -195,6 +208,43 @@ def main() -> int:
         "action": "add", "value": "f" * 64, "label": "clean", "note": "paging"})
     check(resp.status_code == 302, "adding an entry redirects")
     check(store.count_local() == TOTAL + 1, "the added entry is stored")
+
+    seed_history(store)
+
+    print("web: /recent")
+    resp = client.get("/recent")
+    body = resp.get_data(as_text=True)
+    check(resp.status_code == 200, "GET /recent is 200")
+    check(f"1–50 of {HISTORY_ROWS}" in body, "the pager counts the whole history")
+    check("page 1 / 3" in body, "50 rows a page makes three pages")
+    check(body.count('class="mono wrap-cell"') == 50,
+          "the page renders 50 rows")
+    check(len(resp.data) < 60_000, "a page of 50 lookups stays under 60 KB")
+    check(resp.headers.get("Cache-Control") == "no-store",
+          "the feed is not cached")
+    check("X-Robots-Tag" not in resp.headers,
+          "the newest page stays indexable")
+
+    resp = client.get("/recent?page=2")
+    body = resp.get_data(as_text=True)
+    check(f"51–100 of {HISTORY_ROWS}" in body, "page 2 starts at the 51st lookup")
+    check("noindex" in resp.headers.get("X-Robots-Tag", ""),
+          "deeper pages are noindex")
+
+    resp = client.get("/recent?page=3")
+    body = resp.get_data(as_text=True)
+    check(f"101–{HISTORY_ROWS} of {HISTORY_ROWS}" in body,
+          "the last page ends on the last lookup")
+    check('rel="next"' not in body, "the last page has no Older link")
+    check('rel="prev"' in body, "the last page links back")
+
+    resp = client.get("/recent?page=99")
+    check("page 3 / 3" in resp.get_data(as_text=True),
+          "a page past the end is clamped to the last page")
+
+    resp = client.get("/recent?page=abc")
+    check(resp.status_code == 200 and "page 1 / 3" in resp.get_data(as_text=True),
+          "nonsense paging still renders the first page")
 
     print("web: /status")
     # Give a source that really exists a failing health row: the page is

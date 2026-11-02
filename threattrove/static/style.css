@@ -242,6 +242,10 @@ td { padding: 10px; border-bottom: 1px solid var(--line-soft); vertical-align: m
 tbody tr:hover { background: rgba(56,189,248,.04); }
 td.mono, .mono { font-family: var(--mono); font-size: var(--fs-300); }
 td.wrap-cell { word-break: break-all; }
+/* A type name and a relative time are shorter than the column they sit in, but
+   a phone-width table squeezes them until "1h ago" becomes two lines and every
+   row grows a line taller. Only the indicator is allowed to wrap. */
+td.nowrap, th.nowrap { white-space: nowrap; }
 tbody tr:last-child td { border-bottom: 0; }
 
 .src-name { font-weight: 600; }

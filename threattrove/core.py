@@ -22,7 +22,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
 
-VERSION = "2.10.0"
+VERSION = "2.10.1"
 
 DEFAULT_TIMEOUT = float(os.environ.get("TT_TIMEOUT", "20"))
 CACHE_TTL_SECONDS = int(os.environ.get("TT_CACHE_TTL", str(7 * 24 * 3600)))
@@ -1605,14 +1605,26 @@ class Store:
             )
             self.conn.commit()
 
-    def recent(self, limit: int = 12) -> List[Dict[str, Any]]:
+    def recent(self, limit: int = 12, offset: int = 0) -> List[Dict[str, Any]]:
+        """The newest lookups first, one page at a time.
+
+        ``offset`` lets the public feed page backwards instead of rendering
+        every lookup it has ever recorded in one document. The ``history_ts``
+        index covers the ordering, so a deep page costs the same as the first.
+        """
         with self._lock:
             rows = self.conn.execute(
                 "SELECT kind, value, verdict, ts FROM history"
-                " ORDER BY ts DESC LIMIT ?", (limit,)
+                " ORDER BY ts DESC LIMIT ? OFFSET ?", (limit, offset)
             ).fetchall()
         return [{"kind": r[0], "value": r[1], "verdict": r[2], "ts": r[3]}
                 for r in rows]
+
+    def count_recent(self) -> int:
+        """How many lookups the public feed has to page through."""
+        with self._lock:
+            row = self.conn.execute("SELECT COUNT(*) FROM history").fetchone()
+        return int(row[0]) if row else 0
 
     def last_verdict(self, kind: str, value: str) -> Optional[Dict[str, Any]]:
         """The most recent verdict we recorded for one indicator.

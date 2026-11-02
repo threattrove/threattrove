@@ -136,7 +136,7 @@ lands around 140 MB of SQLite — plan disk accordingly.
 | `/i/<kind>?q=…` | Result page: verdict, score, per-source table, what decided it |
 | `/bulk` | Upload a CSV/feed or paste a list; runs as a background job |
 | `/bulk/<job_id>` | Job progress, per-row verdicts, CSV/JSON export |
-| `/recent` | The last 200 lookups on this instance |
+| `/recent` | The lookup feed, newest first, 50 rows a page |
 | `/sources` | Source catalogue with live state (`active` / `needs key` / `opt-in`) |
 | `/local` | The local corpus: 50 rows a page, filter by kind, search a value, add or delete |
 | `/status` | Per-source health: last canary answer, latency, drift, and what is not answering |
@@ -700,7 +700,7 @@ Dockerfile, docker-compose.yml
 .venv/bin/python scripts/check_refang.py      # defanged indicators (offline)
 .venv/bin/python scripts/check_cards.py       # evidence cards and page rendering (offline)
 .venv/bin/python scripts/check_privacy.py     # no queried value leaks to the page or logs (offline)
-.venv/bin/python scripts/check_status.py      # /local paging and search, source-health states, /status and /api/v1/status (offline)
+.venv/bin/python scripts/check_status.py      # /local and /recent paging, source-health states, /status and /api/v1/status (offline)
 .venv/bin/python scripts/check_feodo.py       # Feodo parsing, in-place re-import, local-corpus verdict (offline)
 .venv/bin/python scripts/check_docs.py        # /about, /privacy, /sitemap.xml, /robots.txt (offline)
 .venv/bin/python scripts/check_fresh.py       # fresh=1 rationing, crawler policy, robots (offline)
