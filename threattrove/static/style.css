@@ -239,10 +239,19 @@ tbody tr:last-child td { border-bottom: 0; }
 .dec-fill.muted { background: var(--line); }
 .dec-src { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 
+/* The per-source labels inside "What decided this" are the same objects as the
+   verdict badges in the vendors table, so they use that badge's geometry: a 5px
+   corner radius, the same 11px/1 mono box and the same soft outline. They stay
+   lowercase because they carry source names, not verdicts. */
 .pill.mini {
-  font-size: 10px; font-weight: 600; letter-spacing: .04em;
-  padding: 4px 8px; text-transform: none; font-family: var(--mono);
+  font: 11px/1 var(--mono); letter-spacing: .06em; text-transform: none;
+  padding: 5px 8px; border-radius: 5px; border-color: var(--line);
 }
+.pill.mini.malicious { border-color: rgba(239,68,68,.4); }
+.pill.mini.suspicious { border-color: rgba(245,158,11,.4); }
+.pill.mini.clean { border-color: rgba(34,197,94,.4); }
+.pill.mini.known_good { border-color: rgba(20,184,166,.4); }
+.pill.mini.error { border-color: var(--line); border-style: dashed; }
 
 .dec-pivots { margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--line-soft); }
 .dec-label {

@@ -6,7 +6,7 @@
   <title>{% block title %}{{ site_name }} — reputation lookup for hashes, URLs and domains{% endblock %}</title>
   <meta name="description" content="Self-hosted reputation lookups for file hashes, URLs, domains and IPs. Aggregates free and keyed threat-intelligence feeds into one verdict.">
   <meta name="color-scheme" content="dark">
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v={{ version }}">
   <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
   <meta property="og:site_name" content="{{ site_name }}">
   <meta property="og:type" content="{% block og_type %}website{% endblock %}">

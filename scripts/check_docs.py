@@ -14,7 +14,7 @@ import xml.etree.ElementTree as ET
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from threattrove.core import Store  # noqa: E402
+from threattrove.core import VERSION, Store  # noqa: E402
 from threattrove.web import create_app  # noqa: E402
 
 SITEMAP_NS = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
@@ -80,7 +80,12 @@ def main() -> int:
         check("footer links to Privacy", 'href="/privacy"' in home)
         about = client.get("/about").data.decode()
         check("every page loads its stylesheet from this host",
-              '<link rel="stylesheet" href="/static/style.css">' in about)
+              'href="/static/style.css' in about)
+        # static files are served with a one-hour browser cache, so the URL has
+        # to carry the version or a stylesheet fix stays invisible for an hour.
+        check("the stylesheet URL is busted by the app version",
+              f'href="/static/style.css?v={VERSION}"' in about,
+              "missing ?v=" + VERSION)
         check("og:url uses the configured origin, not the Host header",
               'content="https://threattrove.example/about"' in about)
 
