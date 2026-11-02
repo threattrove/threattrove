@@ -23,6 +23,15 @@
 <div class="alert ok">
   Every active source answered as expected{% if status.checked_at %}, last checked {{ rel_time(status.checked_at) }}{% endif %}.
 </div>
+{% if status.stale_count %}
+<div class="alert info">
+  {{ status.stale_count }} active source{{ '' if status.stale_count == 1 else 's' }}
+  {{ 'has' if status.stale_count == 1 else 'have' }} no canary result from
+  the last {{ status.stale_after_hours }} hours, so {{ 'it is' if status.stale_count == 1 else 'they are' }}
+  unproven rather than healthy. A pager watching <code>?strict=1</code> fails
+  on that until the next canary run.
+</div>
+{% endif %}
 {% elif status.status == 'unknown' %}
 <div class="alert info">
   No check has been recorded yet, so nothing here is a claim about any source.
@@ -39,6 +48,11 @@
   {{ status.counts.warn }} source{{ '' if status.counts.warn == 1 else 's' }}
   answered differently than expected or slowed down. Nothing is down, but a
   changed answer is what a broken parser looks like from outside.
+  {% if status.stale_count %}
+  <strong>{{ status.stale_count }} of them are stale:</strong> no canary result
+  in over {{ status.stale_after_hours }} hours, so the timer may not be running.
+  A pager watching <code>?strict=1</code> treats that as a failure.
+  {% endif %}
 </div>
 {% endif %}
 
@@ -95,8 +109,12 @@ ip      8.8.8.8                                                           stable
   </p>
   <p class="note">
     Machine-readable: <a href="{{ url_for('api_status') }}">/api/v1/status</a>
-    returns the same data, and <code>?strict=1</code> answers 503 unless every
-    active source is healthy.
+    returns the same data. <code>?strict=1</code> answers 503 when a source is
+    <strong>failing</strong> or when a canary result is <strong>stale</strong>
+    (nothing recorded for {{ status.stale_after_hours }} hours, so the timer may
+    be dead); <code>?strict=warn</code> is the loud setting and also fails on a
+    source that is merely slow or that changed its answer. A stale row is
+    flagged in this payload so a monitor can tell "slow" from "unproven".
   </p>
 </div>
 {% endblock %}

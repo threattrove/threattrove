@@ -277,14 +277,21 @@ def _status_payload(runtime: Runtime) -> Dict[str, Any]:
     counts = {"ok": 0, "warn": 0, "bad": 0, "skip": 0, "unchecked": 0,
               "off": 0}
     newest = 0.0
+    stale_count = 0
     out: List[Dict[str, Any]] = []
     for row in rows:
         h = health.get(row["name"]) or {}
         checked_at = float(h.get("checked_at") or 0)
+        # A source with no recent canary answer is unproven, not healthy: the
+        # timer that collects the answers may itself be dead. That is tracked
+        # separately from ``state`` because it is the one condition a pager
+        # must not miss, while a slow-but-answering source should not page.
+        stale = False
         if not row["active"]:
             state, note = "off", row["hint"]
         elif not h:
             state, note = "unchecked", "no canary check yet"
+            stale = True
         else:
             state = health_state(h.get("status", ""), h.get("drift"),
                                  h.get("expected", ""))
@@ -294,12 +301,15 @@ def _status_payload(runtime: Runtime) -> Dict[str, Any]:
             if age > HEALTH_STALE_SECONDS:
                 state = "warn"
                 note = f"last check {int(age // 3600)}h ago"
+                stale = True
+        if stale:
+            stale_count += 1
         counts[state] = counts.get(state, 0) + 1
         out.append({
             "name": row["name"], "display": row["display"],
             "category": row["category"], "kinds": row["kinds"],
             "homepage": row["homepage"], "active": row["active"],
-            "state": state, "note": note,
+            "state": state, "note": note, "stale": stale,
             "status": h.get("status", ""), "verdict": h.get("verdict", ""),
             "indicator": h.get("indicator", ""),
             "latency_ms": h.get("latency_ms"),
@@ -327,6 +337,7 @@ def _status_payload(runtime: Runtime) -> Dict[str, Any]:
         "interval_hours": 4,
         "stale_after_hours": HEALTH_STALE_SECONDS // 3600,
         "counts": counts,
+        "stale_count": stale_count,
         "checked": checked,
         "sources": out,
     }
@@ -844,14 +855,28 @@ def create_app(store: Optional[Store] = None) -> Flask:
 
     @app.get("/api/v1/status")
     def api_status() -> Any:
-        """Source health as JSON. ``?strict=1`` fails when anything is off."""
+        """Source health as JSON, optionally as an HTTP check for a pager.
+
+        ``?strict=1`` (also ``true``/``yes``) answers 503 only when a source is
+        broken (``bad``) or its canary data has gone stale -- the two states
+        that mean lookups are wrong or unproven. ``?strict=warn`` (also
+        ``all``) is the loud setting: it also fails on latency drift and on a
+        source that answers differently than it used to. With no ``strict``
+        argument the payload is informational and never fails.
+        """
         api_limited = api_guard()
         if api_limited:
             return api_limited
         rt: Runtime = app.extensions["threattrove"]
         data = _status_payload(rt)
         resp = jsonify(data)
-        if request.args.get("strict") == "1" and data["status"] != "ok":
+        mode = (request.args.get("strict") or "").strip().lower()
+        failing = bool(data["counts"].get("bad")) or data["stale_count"] > 0
+        if mode in ("warn", "all"):
+            failing = failing or bool(data["counts"].get("warn"))
+        elif mode not in ("1", "true", "yes"):
+            failing = False
+        if failing:
             resp.status_code = 503
         resp.headers["Cache-Control"] = "no-store"
         return resp

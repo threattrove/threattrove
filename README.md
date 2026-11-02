@@ -574,13 +574,38 @@ baseline; a source that later answers differently, or four times slower, is a
 warning. A run costs one request per active source and bypasses the cache, so
 a cached answer cannot hide the breakage it is looking for.
 
-Results are on `/status` and in `/api/v1/status`; `?strict=1` answers 503
-unless every source is healthy, which is the URL to poll from an uptime check.
+Results are on `/status` and in `/api/v1/status`. The JSON is meant to be
+polled, and `?strict=1` turns it into an HTTP check: it answers 503 only when a
+source is `bad` — it errored, timed out, or answered something nobody can
+classify — or when its canary data is **stale**, meaning no check in the last 26
+hours. Staleness is tracked separately from the per-source state because a dead
+timer is the one failure that would otherwise look tidy: the last stored rows
+keep saying `ok` forever.
+
+`?strict=warn` (alias `all`) is the loud setting: it also fails on latency
+drift and on a source that answers differently than it used to. That is a good
+alarm for a human reading `/status` and a poor one for a pager, because a feed
+that is merely slow would wake you at 3 a.m. With no `strict` argument the
+payload is informational and always 200.
+
 A source that was not asked — its allowance is spent, or a sibling endpoint of
 the same provider was just called — is reported as `skip` and never decides the
-verdict.
-journalctl -u threattrove-refresh.service -n 20 --no-pager
-```
+verdict. A source with no canary row at all counts as stale: unproven is not
+healthy.
+
+Two monitors cover the site, and both fit on a free plan:
+
+| monitor | URL | rule |
+| --- | --- | --- |
+| liveness | `https://threattrove.com/health` | HTTP 200, keyword `"status":"ok"` |
+| source health | `https://threattrove.com/api/v1/status?strict=1` | HTTP 200 |
+
+The second is the one that catches "the site is up but every lookup is wrong",
+and it stays green through a slow provider. Pause both around a deploy: the
+restart is brief, but a release that enables a source the canary has not seen
+yet would be stale for up to four hours and page you for it. Both endpoints are
+`no-store` (or, for `/health`, uncached JSON), so a monitor sees the live answer
+rather than a CDN copy.
 
 The old documented export URLs (`/export/csv/full/`, `/export/txt/sha256/full/`)
 now answer **410 Gone**; the live endpoint takes the Auth-Key in the path, as
@@ -594,6 +619,7 @@ Check that the timer is armed and that the last run succeeded:
 ```bash
 systemctl list-timers threattrove-refresh.timer
 systemctl show threattrove-refresh.service -p Result -p ExecMainStatus
+journalctl -u threattrove-refresh.service -n 20 --no-pager
 ```
 
 `deploy/gunicorn.conf.py` binds `127.0.0.1:8080`, 2 gthread workers × 8 threads,
@@ -678,6 +704,7 @@ Dockerfile, docker-compose.yml
 .venv/bin/python scripts/check_feodo.py       # Feodo parsing, in-place re-import, local-corpus verdict (offline)
 .venv/bin/python scripts/check_docs.py        # /about, /privacy, /sitemap.xml, /robots.txt (offline)
 .venv/bin/python scripts/check_fresh.py       # fresh=1 rationing, crawler policy, robots (offline)
+.venv/bin/python scripts/check_monitor.py     # strict=1 pager contract: bad and stale fail, drift alone does not (offline)
 ```
 
 ## Limitations
