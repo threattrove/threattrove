@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+
+{% block title %}Source health — {{ site_name }}{% endblock %}
+
+{% block content %}
+<h1>Source health</h1>
+<p class="lead">
+  Every {{ status.interval_hours }} hours the canary asks each active source about a
+  known indicator and records the answer. A source that changes its answer, stops
+  answering or slows down shows up here before it changes a verdict.
+</p>
+
+<div class="stats">
+  <div class="stat"><b>{{ status.counts.ok }}</b><span>answering</span></div>
+  <div class="stat"><b>{{ status.counts.warn }}</b><span>warning</span></div>
+  <div class="stat"><b>{{ status.counts.bad }}</b><span>failing</span></div>
+  <div class="stat"><b>{{ status.counts.skip }}</b><span>not asked</span></div>
+  <div class="stat"><b>{{ status.counts.unchecked }}</b><span>unchecked</span></div>
+  <div class="stat"><b>{{ status.counts.off }}</b><span>not configured</span></div>
+</div>
+
+{% if status.status == 'ok' %}
+<div class="alert ok">
+  Every active source answered as expected{% if status.checked_at %}, last checked {{ rel_time(status.checked_at) }}{% endif %}.
+</div>
+{% elif status.status == 'unknown' %}
+<div class="alert info">
+  No check has been recorded yet, so nothing here is a claim about any source.
+  Run <code>scripts/source_canary.py</code> once, or wait for the timer.
+</div>
+{% elif status.status == 'bad' %}
+<div class="alert error">
+  {{ status.counts.bad }} active source{{ '' if status.counts.bad == 1 else 's' }}
+  failed the last check. Lookups still return every other source's answer; the
+  failures are listed first below.
+</div>
+{% else %}
+<div class="alert info">
+  {{ status.counts.warn }} source{{ '' if status.counts.warn == 1 else 's' }}
+  answered differently than expected or slowed down. Nothing is down, but a
+  changed answer is what a broken parser looks like from outside.
+</div>
+{% endif %}
+
+<div class="card">
+  <table>
+    <thead>
+      <tr><th>Source</th><th>Supports</th><th>Health</th><th>Last answer</th><th>Latency</th><th>Checked</th></tr>
+    </thead>
+    <tbody>
+    {% for s in status.sources %}
+      <tr>
+        <td class="src-name">
+          {% if s.homepage %}<a href="{{ s.homepage }}" rel="noopener noreferrer nofollow" target="_blank">{{ s.display }}</a>
+          {% else %}{{ s.display }}{% endif %}
+          <div class="note mono" style="font-size:11px">{{ s.name }}</div>
+        </td>
+        <td class="note">{{ s.kinds|join(', ') }}</td>
+        <td>
+          <span class="tag {{ 'malicious' if s.state == 'bad' else 'suspicious' if s.state == 'warn' else 'clean' if s.state == 'ok' else 'unknown' }}">{{ s.state }}</span>
+        </td>
+        <td class="note">
+          {% if s.status %}{{ s.status }}{% if s.verdict and s.verdict != 'unknown' %} · {{ s.verdict }}{% endif %}
+          {% else %}–{% endif %}
+          {% if s.note %}<div class="note mono" style="font-size:11px">{{ s.note }}</div>{% endif %}
+        </td>
+        <td class="mono note">
+          {% if s.latency_ms %}{{ s.latency_ms }} ms{% if s.drift and s.drift > 1.2 %} <span class="muted">{{ '%.1f'|format(s.drift) }}× baseline</span>{% endif %}
+          {% else %}–{% endif %}
+        </td>
+        <td class="note">{% if s.checked_at %}{{ rel_time(s.checked_at) }}{% else %}never{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2>What the canary asks</h2>
+  <p class="note" style="margin-top:0">
+    Four indicators whose answer should not change, each asked of every source
+    that supports its type. A run costs one request per active source, so it
+    bypasses the cache on purpose: a cached answer would hide exactly the
+    breakage it is looking for.
+  </p>
+  <pre class="json">sha256  275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f  EICAR test file
+url     http://malware.testing.google.test/testing/malware/             Safe Browsing sample
+domain  example.com                                                       stable, benign
+ip      8.8.8.8                                                           stable, benign</pre>
+  <p class="note">
+    The first healthy answer becomes the expected one. From then on a source
+    that answers "not found" where it used to answer "found" is a warning rather
+    than a success — that is the shape of both silent breakages fixed in 2.6.0
+    and 2.7.0, neither of which returned an error.
+  </p>
+  <p class="note">
+    Machine-readable: <a href="{{ url_for('api_status') }}">/api/v1/status</a>
+    returns the same data, and <code>?strict=1</code> answers 503 unless every
+    active source is healthy.
+  </p>
+</div>
+{% endblock %}

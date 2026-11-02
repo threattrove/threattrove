@@ -1,0 +1,16 @@
+[Unit]
+Description=Four-hourly ThreatTrove source-health canary
+
+[Timer]
+# A run costs one live request per active source. Four hours catches a feed
+# that broke after an upstream change while spending about six VirusTotal
+# lookups a day out of a 500-a-day allowance. The offset minute keeps it away
+# from the hourly blocklist refresh.
+OnCalendar=*-*-* 00/4:17:00
+RandomizedDelaySec=300
+Persistent=true
+AccuracySec=1min
+Unit=threattrove-canary.service
+
+[Install]
+WantedBy=timers.target

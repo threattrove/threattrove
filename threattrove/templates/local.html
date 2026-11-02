@@ -44,7 +44,21 @@
   </div>
 
   <div class="card">
-    <h2>Entries ({{ entries|length }})</h2>
+    <h2>Entries ({{ total }})</h2>
+
+    <form class="local-filter" method="get" action="{{ url_for('local_page') }}">
+      <input type="text" name="q" value="{{ query }}" aria-label="Filter entries"
+             placeholder="filter by indicator prefix" spellcheck="false"
+             autocomplete="off">
+      <select name="kind" aria-label="Indicator type">
+        <option value="">any type</option>
+        {% for k in ['hash', 'url', 'domain', 'ip'] %}
+        <option value="{{ k }}"{% if kind == k %} selected{% endif %}>{{ k }}</option>
+        {% endfor %}
+      </select>
+      <button type="submit" class="btn small">Filter</button>
+    </form>
+
     {% if entries %}
     <table>
       <thead><tr><th>Indicator</th><th>Label</th><th>Note</th></tr></thead>
@@ -60,8 +74,20 @@
       {% endfor %}
       </tbody>
     </table>
+    <div class="pager">
+      <span class="pager-info">{{ first }}–{{ last }} of {{ total }}</span>
+      {% if page > 1 %}
+      <a class="btn ghost small" rel="prev"
+         href="{{ url_for('local_page', page=page-1, q=query or none, kind=kind or none, per_page=per_page) }}">&larr; Prev</a>
+      {% endif %}
+      {% if page < pages %}
+      <a class="btn ghost small" rel="next"
+         href="{{ url_for('local_page', page=page+1, q=query or none, kind=kind or none, per_page=per_page) }}">Next &rarr;</a>
+      {% endif %}
+      <span class="pager-page">page {{ page }} / {{ pages }}</span>
+    </div>
     {% else %}
-    <div class="empty">No local entries yet.</div>
+    <div class="empty">{% if query or kind %}Nothing matches that filter.{% else %}No local entries yet.{% endif %}</div>
     {% endif %}
   </div>
 </div>

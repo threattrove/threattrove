@@ -337,6 +337,22 @@ details > *:not(summary) { margin: 14px; }
 .hint { font-size: 12px; color: var(--text-mute); margin-top: 6px; }
 hr.sep { border: 0; border-top: 1px solid var(--line); margin: 22px 0; }
 
+/* ---------- paging ---------- */
+
+.pager {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line-soft);
+  font-size: 13px; color: var(--text-mute);
+}
+.pager .btn { margin: 0; }
+.pager-info { font-family: var(--mono); font-size: 12px; }
+.pager-page { margin-left: auto; font-family: var(--mono); font-size: 12px; color: var(--text-dim); }
+
+.local-filter { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 0 0 14px; }
+.local-filter input[type=text] { flex: 1 1 180px; min-width: 0; }
+.local-filter select { flex: 0 1 130px; width: auto; }
+.local-filter .btn { flex: 0 0 auto; }
+
 @media (max-width: 720px) {
   .topbar-inner { height: auto; padding: 12px 0; flex-wrap: wrap; gap: 10px; }
   .searchbar { order: 3; flex-basis: 100%; max-width: none; }

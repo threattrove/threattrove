@@ -51,6 +51,7 @@ from .core import (
     Indicator,
     Store,
     defang,
+    health_state,
     parse_indicator,
 )
 from .sources import ALL_SOURCES
@@ -61,6 +62,20 @@ MAX_PAGE_PER_MIN = int(os.environ.get("TT_PAGE_RATE_LIMIT", "240"))
 MAX_CONCURRENT_JOBS = int(os.environ.get("TT_MAX_JOBS", "2"))
 
 KINDS = ("hash", "url", "domain", "ip")
+
+#: Rows per page on /local. The unpaginated view rendered 500 rows into 174 KB
+#: of HTML and sorted the whole table to do it; 50 rows is about 15 KB and the
+#: page never scans the table.
+LOCAL_PER_PAGE = 50
+
+
+def _int_arg(name: str, default: int) -> int:
+    """A positive integer from the query string, or *default*."""
+    try:
+        value = int(request.args.get(name, ""))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
 
 
 # --------------------------------------------------------------------------
@@ -218,6 +233,78 @@ def _source_rows(runtime: Runtime) -> List[Dict[str, Any]]:
     return rows
 
 
+#: How long a canary result stays meaningful. The timer runs every four hours,
+#: so a row older than a day means the canary itself stopped running.
+HEALTH_STALE_SECONDS = 26 * 3600
+
+
+def _status_payload(runtime: Runtime) -> Dict[str, Any]:
+    """The source-health view: the last canary result for every source.
+
+    Inactive sources are listed too, with the reason they are off, so the page
+    answers "why is that feed not being asked?" without a trip to /sources.
+    """
+    rows = _source_rows(runtime)
+    health = runtime.store.health_for()
+    now = time.time()
+    counts = {"ok": 0, "warn": 0, "bad": 0, "skip": 0, "unchecked": 0,
+              "off": 0}
+    newest = 0.0
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        h = health.get(row["name"]) or {}
+        checked_at = float(h.get("checked_at") or 0)
+        if not row["active"]:
+            state, note = "off", row["hint"]
+        elif not h:
+            state, note = "unchecked", "no canary check yet"
+        else:
+            state = health_state(h.get("status", ""), h.get("drift"),
+                                 h.get("expected", ""))
+            note = h.get("note", "")
+            newest = max(newest, checked_at)
+            age = now - checked_at
+            if age > HEALTH_STALE_SECONDS:
+                state = "warn"
+                note = f"last check {int(age // 3600)}h ago"
+        counts[state] = counts.get(state, 0) + 1
+        out.append({
+            "name": row["name"], "display": row["display"],
+            "category": row["category"], "kinds": row["kinds"],
+            "homepage": row["homepage"], "active": row["active"],
+            "state": state, "note": note,
+            "status": h.get("status", ""), "verdict": h.get("verdict", ""),
+            "indicator": h.get("indicator", ""),
+            "latency_ms": h.get("latency_ms"),
+            "baseline_ms": h.get("baseline_ms"), "drift": h.get("drift"),
+            "checked_at": checked_at or None,
+        })
+    rank = {"bad": 0, "warn": 1, "skip": 2, "unchecked": 3, "ok": 4, "off": 5}
+    out.sort(key=lambda r: (rank[r["state"]], str(r["display"]).lower()))
+    checked = counts["ok"] + counts["warn"] + counts["bad"]
+    if counts["bad"]:
+        overall = "bad"
+    elif counts["warn"]:
+        overall = "warn"
+    elif counts["ok"]:
+        overall = "ok"
+    else:
+        # nothing was actually answered: an empty database and a run that only
+        # ever got skips are both "no claim", not "healthy"
+        overall = "unknown"
+    return {
+        "status": overall,
+        "version": VERSION,
+        "generated": now,
+        "checked_at": newest or None,
+        "interval_hours": 4,
+        "stale_after_hours": HEALTH_STALE_SECONDS // 3600,
+        "counts": counts,
+        "checked": checked,
+        "sources": out,
+    }
+
+
 def create_app(store: Optional[Store] = None) -> Flask:
     app = Flask(__name__)
     app.config.update(
@@ -369,6 +456,14 @@ def create_app(store: Optional[Store] = None) -> Flask:
         rt: Runtime = app.extensions["threattrove"]
         return render_template("sources.html", sources=_source_rows(rt))
 
+    @app.get("/status")
+    def status_page() -> Any:
+        guard = page_guard()
+        if guard:
+            return guard
+        rt: Runtime = app.extensions["threattrove"]
+        return render_template("status.html", status=_status_payload(rt))
+
     @app.route("/local", methods=["GET", "POST"])
     def local_page() -> Any:
         guard = page_guard()
@@ -395,9 +490,25 @@ def create_app(store: Optional[Store] = None) -> Flask:
                     rt.store.add_local(ind.kind, ind.value, label, note)
                     message = f"stored {ind.value} as {label}"
             return redirect(url_for("local_page", msg=message))
-        entries = rt.store.list_local()
-        return render_template("local.html", entries=entries,
-                               message=request.args.get("msg", ""))
+        query = (request.args.get("q") or "").strip()[:120]
+        kind = (request.args.get("kind") or "").strip().lower()
+        if kind not in KINDS:
+            kind = ""
+        per_page = max(10, min(200, _int_arg("per_page", LOCAL_PER_PAGE)))
+        total = rt.store.count_local(query, kind)
+        pages = max(1, (total + per_page - 1) // per_page)
+        page = min(_int_arg("page", 1), pages)
+        entries = rt.store.list_local(limit=per_page,
+                                      offset=(page - 1) * per_page,
+                                      query=query, kind=kind)
+        shown = len(entries)
+        return render_template(
+            "local.html", entries=entries,
+            message=request.args.get("msg", ""), total=total, page=page,
+            pages=pages, per_page=per_page, query=query, kind=kind,
+            first=(page - 1) * per_page + 1 if shown else 0,
+            last=(page - 1) * per_page + shown,
+        )
 
     # -- bulk -------------------------------------------------------------
     @app.route("/bulk", methods=["GET", "POST"])
@@ -586,6 +697,20 @@ def create_app(store: Optional[Store] = None) -> Flask:
         stats["sources_total"] = len(ALL_SOURCES)
         stats["version"] = VERSION
         return jsonify(stats)
+
+    @app.get("/api/v1/status")
+    def api_status() -> Any:
+        """Source health as JSON. ``?strict=1`` fails when anything is off."""
+        api_limited = api_guard()
+        if api_limited:
+            return api_limited
+        rt: Runtime = app.extensions["threattrove"]
+        data = _status_payload(rt)
+        resp = jsonify(data)
+        if request.args.get("strict") == "1" and data["status"] != "ok":
+            resp.status_code = 503
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
 
     @app.get("/api")
     def api_docs() -> Any:

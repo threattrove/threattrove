@@ -126,7 +126,8 @@ lands around 140 MB of SQLite — plan disk accordingly.
 | `/bulk/<job_id>` | Job progress, per-row verdicts, CSV/JSON export |
 | `/recent` | Recent lookups on this instance |
 | `/sources` | Source catalogue with live state (`active` / `needs key` / `opt-in`) |
-| `/local` | Manage the local corpus |
+| `/local` | Manage the local corpus: search by prefix, paged |
+| `/status` | Per-source health: last canary answer, latency, drift, and what is not answering |
 | `/api` | JSON API documentation |
 
 ---
@@ -498,6 +499,36 @@ install -Dm644 deploy/threattrove-refresh.timer /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now threattrove-refresh.timer
 systemctl start threattrove-refresh.service      # run once now
+```
+
+### Checking that the sources still answer
+
+A source can break without failing: it answers HTTP 200 with a document that
+parses to "not found". That is how Safe Browsing's unlisted answer and
+MalShare's empty detail page both read as misses until 2.6.0 and 2.7.0.
+
+The canary asks every active source about an indicator whose answer should not
+change, and records what came back:
+
+```bash
+.venv/bin/python scripts/source_canary.py --dry-run   # show answers, write nothing
+.venv/bin/python scripts/source_canary.py             # record them
+install -Dm644 deploy/threattrove-canary.service /etc/systemd/system/
+install -Dm644 deploy/threattrove-canary.timer /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now threattrove-canary.timer
+```
+
+The first healthy answer becomes the expected one, and its latency becomes a
+baseline; a source that later answers differently, or four times slower, is a
+warning. A run costs one request per active source and bypasses the cache, so
+a cached answer cannot hide the breakage it is looking for.
+
+Results are on `/status` and in `/api/v1/status`; `?strict=1` answers 503
+unless every source is healthy, which is the URL to poll from an uptime check.
+A source that was not asked — its allowance is spent, or a sibling endpoint of
+the same provider was just called — is reported as `skip` and never decides the
+verdict.
 journalctl -u threattrove-refresh.service -n 20 --no-pager
 ```
 
@@ -563,6 +594,7 @@ Dockerfile, docker-compose.yml
 .venv/bin/python scripts/check_refang.py      # defanged indicators (offline)
 .venv/bin/python scripts/check_cards.py       # evidence cards and page rendering (offline)
 .venv/bin/python scripts/check_privacy.py     # no queried value leaks to the page or logs (offline)
+.venv/bin/python scripts/check_status.py      # /local paging and search, source-health states, /status and /api/v1/status (offline)
 ```
 
 ## Limitations

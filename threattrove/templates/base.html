@@ -43,6 +43,7 @@
       <a href="{{ url_for('bulk_page') }}" {% if request.endpoint == 'bulk_page' %}class="active"{% endif %}>Bulk</a>
       <a href="{{ url_for('recent_page') }}" {% if request.endpoint == 'recent_page' %}class="active"{% endif %}>Recent</a>
       <a href="{{ url_for('sources_page') }}" {% if request.endpoint == 'sources_page' %}class="active"{% endif %}>Sources</a>
+      <a href="{{ url_for('status_page') }}" {% if request.endpoint == 'status_page' %}class="active"{% endif %}>Status</a>
       <a href="{{ url_for('api_docs') }}" {% if request.endpoint == 'api_docs' %}class="active"{% endif %}>API</a>
     </nav>
   </div>
@@ -57,6 +58,8 @@
     <span>{{ site_name }} v{{ version }}</span>
     <span class="dot">·</span>
     <span>aggregates public and keyed threat-intelligence feeds</span>
+    <span class="dot">·</span>
+    <a href="{{ url_for('status_page') }}">Status</a>
     <span class="dot">·</span>
     <a href="{{ url_for('api_docs') }}">API</a>
     <span class="grow"></span>

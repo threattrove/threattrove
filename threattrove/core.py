@@ -22,7 +22,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
 
-VERSION = "2.7.0"
+VERSION = "2.8.0"
 
 DEFAULT_TIMEOUT = float(os.environ.get("TT_TIMEOUT", "20"))
 CACHE_TTL_SECONDS = int(os.environ.get("TT_CACHE_TTL", str(7 * 24 * 3600)))
@@ -1179,6 +1179,57 @@ class Report:
 # Storage
 # --------------------------------------------------------------------------
 
+#: Health states a canary check can leave a source in.
+HEALTH_OK = "ok"
+HEALTH_WARN = "warn"
+HEALTH_BAD = "bad"
+#: Neither good nor bad: the source was not asked. Its allowance was spent, or
+#: another endpoint of the same provider had just been called. A skip is a fact
+#: about our budget and pacing, not about the source, so it is counted apart
+#: from the answers and never decides the overall status.
+HEALTH_SKIP = "skip"
+
+#: Statuses in which a source answered the question it was asked. Anything
+#: outside this set is either a failure (bad) or a check that never really ran
+#: (warn), and the two must not be reported as the same thing.
+ANSWERED_STATUSES = frozenset({"found", "not_found", "matched", "no_match"})
+SKIPPED_STATUSES = frozenset({"skipped", "deferred", "quota"})
+FAILED_STATUSES = frozenset({"error", "timeout", "unauthorized", "empty",
+                             "blocked", "forbidden"})
+
+#: Latency multiple over the source's baseline that is worth a warning.
+HEALTH_DRIFT_LIMIT = 4.0
+
+
+def health_state(status: str, drift: Optional[float] = None,
+                 expected: str = "") -> str:
+    """Classify one canary answer as ok, warn or bad.
+
+    ``drift`` is the check's latency as a multiple of that source's baseline and
+    ``expected`` is the status it answered with when it was last known healthy.
+
+    The status comparison is the point of the whole exercise. Both silent
+    breakages fixed in 2.6.0 and 2.7.0 returned HTTP 200 and a document that
+    parsed to "not found": no error, no exception, just a different answer. A
+    canary that only looks for failures would have called both of them healthy.
+    """
+    got = (status or "").strip().lower()
+    if not got or got in FAILED_STATUSES:
+        return HEALTH_BAD
+    if got in SKIPPED_STATUSES:
+        # not asked: the allowance was spent, or the provider was being paced,
+        # so this says nothing either way about the source
+        return HEALTH_SKIP
+    if got not in ANSWERED_STATUSES:
+        # an answer we cannot classify is worth a look, unlike a skip
+        return HEALTH_WARN
+    if expected and got != expected:
+        return HEALTH_WARN
+    if drift is not None and drift >= HEALTH_DRIFT_LIMIT:
+        return HEALTH_WARN
+    return HEALTH_OK
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS cache (
     kind          TEXT NOT NULL,
@@ -1197,6 +1248,11 @@ CREATE TABLE IF NOT EXISTS local (
     added_at REAL NOT NULL,
     PRIMARY KEY (kind, value)
 );
+-- /local used to sort every row in this table on every page view because
+-- nothing indexed added_at. It is paged now, and both orders have an index:
+-- newest-first reads walk local_added, a filtered list seeks local_value.
+CREATE INDEX IF NOT EXISTS local_added ON local(added_at DESC);
+CREATE INDEX IF NOT EXISTS local_value ON local(value);
 CREATE TABLE IF NOT EXISTS history (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
     kind    TEXT NOT NULL,
@@ -1213,6 +1269,23 @@ CREATE TABLE IF NOT EXISTS quota (
     used      INTEGER NOT NULL DEFAULT 0,
     exhausted INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (quota, day)
+);
+-- What the source-health canary last saw, one row per source. Kept apart from
+-- the cache on purpose: a health row is an observation about the source, not a
+-- verdict about a sample, and nothing in a lookup may ever read it.
+CREATE TABLE IF NOT EXISTS source_health (
+    source      TEXT PRIMARY KEY,
+    kind        TEXT NOT NULL DEFAULT '',
+    indicator   TEXT NOT NULL DEFAULT '',
+    status      TEXT NOT NULL DEFAULT '',
+    verdict     TEXT NOT NULL DEFAULT '',
+    note        TEXT NOT NULL DEFAULT '',
+    latency_ms  INTEGER NOT NULL DEFAULT 0,
+    checked_at  REAL NOT NULL DEFAULT 0,
+    expected    TEXT NOT NULL DEFAULT '',
+    baseline_ms REAL,
+    baseline_at REAL,
+    drift       REAL
 );
 """
 
@@ -1435,12 +1508,47 @@ class Store:
             self.conn.commit()
             return cur.rowcount
 
-    def list_local(self, limit: int = 500) -> List[Dict[str, Any]]:
+    def _local_filter(self, query: str = "",
+                      kind: str = "") -> Tuple[str, tuple]:
+        """The WHERE clause shared by the list and the count, plus its args.
+
+        ``kind`` is matched exactly and ``query`` as a prefix of the stored
+        value. The prefix is expressed as a range comparison rather than LIKE
+        on purpose: SQLite's LIKE is case-insensitive, which makes it unable to
+        use an index, and on a 3.5M-row table that difference is the whole page
+        time. Values are stored lowercased, so lowering the query matches.
+        """
+        clauses: List[str] = []
+        args: List[Any] = []
+        if kind:
+            clauses.append("kind = ?")
+            args.append(kind)
+        q = (query or "").strip().lower()
+        if q:
+            clauses.append("value >= ? AND value < ?")
+            args.append(q)
+            args.append(q + chr(0x10FFFF))   # everything that starts with q
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        return where, tuple(args)
+
+    def count_local(self, query: str = "", kind: str = "") -> int:
+        """How many stored local verdicts match a filter."""
+        where, args = self._local_filter(query, kind)
+        with self._lock:
+            return self.conn.execute(
+                "SELECT COUNT(*) FROM local" + where, args).fetchone()[0]
+
+    def list_local(self, limit: int = 500, offset: int = 0,
+                   query: str = "", kind: str = "") -> List[Dict[str, Any]]:
+        """One page of stored local verdicts, newest first."""
+        where, args = self._local_filter(query, kind)
+        limit = max(1, min(1000, int(limit)))
+        offset = max(0, int(offset))
         with self._lock:
             rows = self.conn.execute(
-                "SELECT kind, value, label, note, added_at FROM local"
-                " ORDER BY added_at DESC LIMIT ?", (limit,)
-            ).fetchall()
+                "SELECT kind, value, label, note, added_at FROM local" + where
+                + " ORDER BY added_at DESC LIMIT ? OFFSET ?",
+                (*args, limit, offset)).fetchall()
         return [{"kind": r[0], "value": r[1], "label": r[2], "note": r[3],
                  "added_at": r[4]} for r in rows]
 
@@ -1501,6 +1609,88 @@ class Store:
         return {"lookups_total": total, "lookups_24h": recent,
                 "cached_entries": cached, "local_entries": local,
                 "malicious_total": flagged}
+
+    # -- source health ---------------------------------------------------
+    def record_health(self, source: str, status: str, *,
+                      kind: str = "", indicator: str = "", verdict: str = "",
+                      note: str = "", latency_ms: int = 0) -> Dict[str, Any]:
+        """Store the outcome of one canary check and return the row.
+
+        The first healthy answer for a source becomes the status it is expected
+        to repeat, and its latency becomes a baseline. Later checks are compared
+        with both, so a feed that starts saying "not found" where it used to say
+        "found" is visible even though nothing returned an error.
+
+        The baseline is an exponential average: a provider that has genuinely
+        become slower moves the baseline within a few runs instead of alarming
+        forever, while a sudden spike still stands out.
+        """
+        now = time.time()
+        source = (source or "").strip()
+        status = (status or "").strip().lower()
+        latency_ms = max(0, int(latency_ms or 0))
+        with self._lock:
+            prev = self.conn.execute(
+                "SELECT expected, baseline_ms, baseline_at FROM source_health"
+                " WHERE source=?", (source,)).fetchone()
+            expected = (prev[0] or "") if prev else ""
+            baseline = prev[1] if prev and prev[1] else None
+            baseline_at = prev[2] if prev else None
+            drift = (round(latency_ms / baseline, 2)
+                     if baseline and latency_ms else None)
+            state = health_state(status, drift, expected)
+            if state == HEALTH_OK:
+                if not expected:
+                    expected = status
+                if latency_ms:
+                    baseline = (round(baseline * 0.8 + latency_ms * 0.2, 1)
+                                if baseline else float(latency_ms))
+                    baseline_at = now
+            note = (note or "")[:300]
+            self.conn.execute(
+                "INSERT INTO source_health (source, kind, indicator, status,"
+                " verdict, note, latency_ms, checked_at, expected, baseline_ms,"
+                " baseline_at, drift) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
+                " ON CONFLICT(source) DO UPDATE SET"
+                " kind=excluded.kind, indicator=excluded.indicator,"
+                " status=excluded.status, verdict=excluded.verdict,"
+                " note=excluded.note, latency_ms=excluded.latency_ms,"
+                " checked_at=excluded.checked_at, expected=excluded.expected,"
+                " baseline_ms=excluded.baseline_ms,"
+                " baseline_at=excluded.baseline_at, drift=excluded.drift",
+                (source, kind, indicator, status, verdict, note, latency_ms,
+                 now, expected, baseline, baseline_at, drift))
+            self.conn.commit()
+        return {"source": source, "state": state, "status": status,
+                "kind": kind, "indicator": indicator, "verdict": verdict,
+                "note": note, "latency_ms": latency_ms, "drift": drift,
+                "expected": expected, "baseline_ms": baseline,
+                "baseline_at": baseline_at, "checked_at": now}
+
+    def health_rows(self) -> List[Dict[str, Any]]:
+        """Every stored health observation, worst state first."""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT source, kind, indicator, status, verdict, note,"
+                " latency_ms, checked_at, expected, baseline_ms, baseline_at,"
+                " drift FROM source_health").fetchall()
+        out = []
+        for r in rows:
+            expected = r[8] or ""
+            out.append({
+                "source": r[0], "kind": r[1], "indicator": r[2],
+                "status": r[3], "verdict": r[4], "note": r[5],
+                "latency_ms": r[6], "checked_at": r[7], "expected": expected,
+                "baseline_ms": r[9], "baseline_at": r[10], "drift": r[11],
+                "state": health_state(r[3], r[11], expected),
+            })
+        order = {HEALTH_BAD: 0, HEALTH_WARN: 1, HEALTH_OK: 2}
+        out.sort(key=lambda h: (order.get(h["state"], 3), h["source"]))
+        return out
+
+    def health_for(self) -> Dict[str, Dict[str, Any]]:
+        """Health rows keyed by source name."""
+        return {h["source"]: h for h in self.health_rows()}
 
 
 # --------------------------------------------------------------------------
@@ -1698,7 +1888,14 @@ class Engine:
         return pace_slot(key, source.min_interval)
 
     # -- the lookup -------------------------------------------------------
-    def lookup(self, ind: Indicator, use_cache: Optional[bool] = None) -> Report:
+    def lookup(self, ind: Indicator, use_cache: Optional[bool] = None,
+               record: bool = True) -> Report:
+        """Run every applicable source for one indicator.
+
+        ``record=False`` keeps the lookup out of the history table, so the
+        canary's test indicators never show up in the public "recent" feed or
+        in the lookup counters.
+        """
         started = time.time()
         report = Report(indicator=ind)
         cache_on = self.use_cache if use_cache is None else use_cache
@@ -1757,12 +1954,27 @@ class Engine:
         report.results.sort(key=lambda r: (order.get(r.source, 999), r.source))
         report.elapsed = time.time() - started
 
-        if self.store:
+        if self.store and record:
             try:
                 self.store.record_lookup(report)
             except sqlite3.Error:
                 pass
         return report
+
+    def probe(self, source: Source, ind: Indicator,
+              use_cache: bool = False) -> Tuple["SourceResult", float]:
+        """Ask one source about one indicator, and time the answer.
+
+        A single-source lookup, used by the health canary. Per-source timing is
+        what makes a provider that has become slow, rather than wrong, visible;
+        the report-wide elapsed time cannot attribute that to anyone.
+        """
+        started = time.time()
+        try:
+            result = self._run(source, ind, use_cache)
+        except Exception as exc:  # noqa: BLE001 - a probe never raises
+            result = source.result(status="error", note=str(exc)[:180])
+        return result, (time.time() - started) * 1000.0
 
     def _run(self, source: Source, ind: Indicator, use_cache: bool) -> SourceResult:
         if self.store and use_cache:

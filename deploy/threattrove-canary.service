@@ -1,0 +1,36 @@
+[Unit]
+Description=ThreatTrove source-health canary
+Documentation=https://threattrove.com/status
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# The service user, not root: a canary run writes to the database, and a
+# root-owned WAL file would lock the web workers out of it.
+User=threattrove
+Group=threattrove
+WorkingDirectory=/opt/threattrove
+EnvironmentFile=-/etc/threattrove/threattrove.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/threattrove/.venv/bin/python /opt/threattrove/scripts/source_canary.py
+Nice=10
+IOSchedulingClass=idle
+# a source that hangs must not hold the next run back
+TimeoutStartSec=900
+StandardOutput=journal
+StandardError=journal
+
+# --- hardening -----------------------------------------------------------
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+ReadWritePaths=/var/lib/threattrove
