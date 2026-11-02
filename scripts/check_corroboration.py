@@ -3,7 +3,11 @@
 
     python scripts/check_corroboration.py
 
-Two rules are under test.
+Three rules are under test.
+
+0. The weighted score stays on the -100..100 scale the pages report. Summed
+   weights are unbounded, and an unbounded sum used to render as "score
+   600/100".
 
 1. Corroboration counts *authorities*, not rows. Rows published by one
    authority -- two engine panels, or a feed answering for a payload and for a
@@ -46,6 +50,20 @@ def report(*rows) -> core.Report:
     rep = core.Report(indicator=core.parse_indicator(H))
     rep.results = list(rows)
     return rep
+
+
+def score_is_bounded() -> None:
+    print("\n[score bounds]")
+    check(report(row("circl")).score() == 100,
+          "one malicious source scores 100")
+    check(report(row("circl"), row("otx")).score() == 100,
+          "two malicious sources score 100, not 200")
+    check(report(row("circl", core.VERDICT_CLEAN),
+                row("otx", core.VERDICT_CLEAN)).score() == -40,
+          "ordinary sums are not flattened by the clamp")
+    check(report(row("circl", core.VERDICT_KNOWN_GOOD),
+                row("otx", core.VERDICT_KNOWN_GOOD)).score() == -100,
+          "two known-good sources score -100, not -200")
 
 
 def authorities() -> None:
@@ -262,6 +280,7 @@ def retry_after() -> None:
 
 
 if __name__ == "__main__":
+    score_is_bounded()
     authorities()
     two_panels_do_not_convict()
     duplicate_rows_do_not_convict()

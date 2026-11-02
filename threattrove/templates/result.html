@@ -31,7 +31,7 @@
   {% if digest != indicator.value %}{% set _ = extra.items.append(algo ~ ': ' ~ digest) %}{% endif %}
 {% endfor %}
 {% if extra.items %}
-<div class="note" style="margin:-8px 0 16px;font-family:var(--mono);font-size:12px">
+<div class="note" style="margin:-8px 0 16px;font-family:var(--mono);font-size:var(--fs-200)">
   {{ extra.items|join('  ·  ') }}
 </div>
 {% endif %}
@@ -174,7 +174,7 @@
           {% if indicator.host %}<tr><td class="note">Host</td><td class="mono">{{ indicator.host }}</td></tr>{% endif %}
           {% if indicator.domain and indicator.domain != indicator.value %}<tr><td class="note">Registrable domain</td><td class="mono">{{ indicator.domain }}</td></tr>{% endif %}
           {% if indicator.path %}<tr><td class="note">Path</td><td class="mono wrap-cell">{{ indicator.path }}</td></tr>{% endif %}
-          <tr><td class="note">Weighted score</td><td class="mono">{{ report.score }}</td></tr>
+          <tr><td class="note">Weighted score</td><td class="mono">{{ report.score }} / 100</td></tr>
           <tr><td class="note">Corroboration</td><td class="mono">{{ report.corroboration }}</td></tr>
           {% if report.families %}<tr><td class="note">Family</td><td class="note">{{ report.families|join(', ') }}</td></tr>{% endif %}
           <tr><td class="note">Flagged by</td><td class="note">{{ report.results|selectattr('verdict', 'in', ['malicious','suspicious'])|map(attribute='source')|join(', ') or '–' }}</td></tr>

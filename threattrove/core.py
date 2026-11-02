@@ -22,7 +22,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
 
-VERSION = "2.9.4"
+VERSION = "2.10.0"
 
 DEFAULT_TIMEOUT = float(os.environ.get("TT_TIMEOUT", "20"))
 CACHE_TTL_SECONDS = int(os.environ.get("TT_CACHE_TTL", str(7 * 24 * 3600)))
@@ -614,7 +614,14 @@ class Report:
                 if r.category == "reputation" and r.status in SCORED_STATUSES]
 
     def score(self) -> int:
-        return sum(self._weights())
+        """Weighted score, clamped to the -100..100 scale the UI reports.
+
+        Summing the weights is unbounded: two malicious sources weigh 200 and
+        the page then claims "score 200/100". The clamp keeps the number on
+        the scale every caller already labels as a percentage of 100, while
+        the sign still separates a clean result from a malicious one.
+        """
+        return max(-100, min(100, sum(self._weights())))
 
     def verdict(self) -> str:
         """Aggregate verdict, requiring one direct look at the file to convict.
