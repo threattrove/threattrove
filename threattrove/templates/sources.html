@@ -27,7 +27,9 @@
         <td><span class="tag {{ 'intel' if s.category == 'intel' else 'unknown' }}">{{ s.category }}</span></td>
         <td class="mono note">{{ 'none' if s.keyless else (s.env_key or 'none') }}</td>
         <td>
-          {% if s.state == 'active' %}<span class="tag clean">active</span>
+          {# green is reserved for verdicts and for real health; "enabled" is
+             not a finding, so an active source is a plain neutral tag. #}
+          {% if s.state == 'active' %}<span class="tag">active</span>
           {% elif s.state == 'disabled' %}<span class="tag unknown">off</span>
           {% else %}<span class="tag error">needs key</span>{% endif %}
           {% if s.state == 'disabled' and s.opt_in %}

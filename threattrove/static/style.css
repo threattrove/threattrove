@@ -9,7 +9,7 @@
   --line-soft: #1b2633;
   --text: #e3ecf5;
   --text-dim: #93a4b8;
-  --text-mute: #6b7d92;
+  --text-mute: #7e8fa4;
   --accent: #38bdf8;
   --accent-2: #22d3ee;
   --bad: #ef4444;
@@ -111,6 +111,9 @@ p.lead { color: var(--text-dim); margin: 0 0 24px; max-width: 70ch; }
 .card + .card { margin-top: 18px; }
 
 .grid { display: grid; gap: 18px; }
+/* Grid items default to min-width:auto, so a wide data table inside a card
+   forces its column past the viewport instead of scrolling. */
+.grid > * { min-width: 0; }
 .grid.two { grid-template-columns: 1.35fr 1fr; }
 @media (max-width: 860px) { .grid.two { grid-template-columns: 1fr; } }
 
@@ -269,7 +272,8 @@ tbody tr:last-child td { border-bottom: 0; }
 
 /* ---------- stats ---------- */
 
-.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(104px, 1fr)); gap: 10px; }
+/* Fixed 4 columns so the row never orphans a ragged last card. */
+.stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
 .stat { background: var(--panel); border: 1px solid var(--line-soft); border-radius: 9px; padding: 12px; }
 .stat b { display: block; font: 700 21px/1.2 var(--mono); }
 .stat span { font-size: 12px; color: var(--text-mute); text-transform: uppercase; letter-spacing: .07em; }
@@ -371,4 +375,8 @@ hr.sep { border: 0; border-top: 1px solid var(--line); margin: 22px 0; }
   .hero h1 { font-size: 26px; }
   td, th { padding: 9px 6px; }
   .ind-value { font-size: 13px; }
+  /* Data tables are wider than a phone. Scroll them inside their own card
+     instead of letting them stretch the whole page sideways. */
+  table { display: block; width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

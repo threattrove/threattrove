@@ -141,9 +141,11 @@
       {% endif %}
     </div>
 
+    {# Only render the card when there is something in it: an empty one was a
+       172px box holding one short sentence. #}
+    {% if intel %}
     <div class="card">
       <h2>Context &amp; intelligence</h2>
-      {% if intel %}
       <table>
         <thead>
           <tr><th>Source</th><th>Type</th><th>Detail</th></tr>
@@ -158,10 +160,8 @@
         {% endfor %}
         </tbody>
       </table>
-      {% else %}
-      <div class="empty">No enrichment available for this indicator type.</div>
-      {% endif %}
     </div>
+    {% endif %}
   </div>
 
   <div>
