@@ -311,6 +311,9 @@ anonymous hash.
 | reverse IP (HackerTarget) | domain/ip | intel | keyless, **opt-in** | `TT_ENABLE_REVERSE_IP=1` |
 | VirusTotal (file/url) | hash/url | reputation | keyed | `VT_API_KEY` |
 | VirusTotal (domain/IP) | domain/ip | reputation | keyed, **opt-in** | `VT_API_KEY` + `TT_VT_DOMAINS=1` |
+| MetaDefender (file) | hash | reputation | keyed | `MD_API_KEY` |
+| MetaDefender (URL) | url | reputation | keyed | `MD_API_KEY` |
+| MetaDefender (domain/IP) | domain/ip | reputation | keyed | `MD_API_KEY` |
 | MalwareBazaar | hash | reputation | keyed | `ABUSECH_AUTH_KEY` |
 | ThreatFox | hash/url/domain/ip | reputation | keyed | `ABUSECH_AUTH_KEY` |
 | URLhaus (hash + URL) | hash/url | reputation | keyed | `ABUSECH_AUTH_KEY` |
@@ -341,6 +344,14 @@ Notes:
   and the skipped answer is not cached, so a lookup gets a real answer again
   tomorrow. `/sources` and `/api/v1/sources` show `used/limit today` for each
   shared allowance.
+* MetaDefender Cloud is the second engine panel. VirusTotal and MetaDefender
+  report on different vendor sensors, so their agreement is worth more than one
+  panel answering twice — but neither panel can convict alone: both collapse
+  onto the same `engine-panel` authority, and a file still needs a second,
+  independent authority (a sample feed, a sandbox, a local analyst) before it
+  is called malicious. Its community key allows 1000 reputation lookups a day
+  and 500 an hour; `TT_MD_DAILY_BUDGET` (default 800) and
+  `TT_MD_MIN_INTERVAL` (default 7.2s) keep a burst from spending either.
 * Sources without a key are simply skipped and listed as `needs key` in
   `/sources`; they never fail a lookup.
 * Hybrid Analysis is read through `GET /api/v2/overview/{sha256}`; the older
@@ -374,6 +385,8 @@ Copy `deploy/threattrove.env.example` and edit. The important ones:
 | `TT_ENABLE_REVERSE_IP` | *(empty)* | `1` enables reverse-IP |
 | `TT_VT_DOMAINS` | *(empty)* | `1` enables VirusTotal domain/IP lookups |
 | `TT_VT_DAILY_BUDGET` | `400` | VirusTotal requests/day, shared by its three sources |
+| `TT_MD_DAILY_BUDGET` | `800` | MetaDefender requests/day, shared by its three sources |
+| `TT_MD_MIN_INTERVAL` | `7.2` | seconds between MetaDefender calls (500/hour ceiling) |
 
 ### Cache invalidation
 
@@ -495,7 +508,7 @@ static caching and per-zone rate limits.
 ```
 threattrove/
   core.py       parse indicators, Engine (threaded, paced, deadline), Store, Report
-  sources.py    21 source implementations + verdict helpers
+  sources.py    24 source implementations + verdict helpers
   bulk.py       CSV/JSON/newline parsing, job runner, CSV export
   cli.py        `threattrove` entry point
   web.py        Flask app factory + `threattrove-web`
@@ -514,6 +527,7 @@ Dockerfile, docker-compose.yml
 .venv/bin/python scripts/smoke.py             # + live hash/URL/domain lookups
 .venv/bin/python scripts/check_vt_floor.py    # engine-ratio floor (offline)
 .venv/bin/python scripts/check_quota.py       # shared allowance, skipped answers, sources page (offline)
+.venv/bin/python scripts/check_metadefender.py # second engine panel: parsing, floor, quota share (offline; --live adds real calls)
 ```
 
 ## Limitations

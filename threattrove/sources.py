@@ -932,6 +932,279 @@ class VirusTotalDomain(_VirusTotalQuota, Source):
 
 
 # ==========================================================================
+# MetaDefender Cloud -- the second engine panel
+# ==========================================================================
+
+#: MetaDefender Cloud's community key allows 1000 reputation lookups a day and
+#: no more than 500 an hour. One key answers for a hash, a URL, a domain and an
+#: IP, and all four endpoints spend the same allowance, so they share one quota
+#: counter and one pace slot exactly like the VirusTotal endpoints do. The
+#: default stops at 80% of the daily ceiling on purpose: a burst of lookups
+#: should not leave the rest of the day with nothing.
+MD_DAILY_BUDGET = 800
+MD_BUDGET_ENV = "TT_MD_DAILY_BUDGET"
+
+#: 500 calls an hour is one every 7.2 seconds. The ceiling belongs to the key,
+#: not to the endpoint or to the worker that happens to spend it, so the pace
+#: slot is shared by the whole process. ``TT_MD_MIN_INTERVAL=0`` lifts it.
+MD_MIN_INTERVAL = 7.2
+MD_MIN_INTERVAL_ENV = "TT_MD_MIN_INTERVAL"
+
+#: MetaDefender's "enough vendors must agree" floor. One vendor disliking a
+#: file out of twenty is the same noise that forced the VirusTotal floor, so
+#: the rule is the same shape: a share floor with a hard minimum of two.
+MD_MIN_DETECTIONS = 2
+MD_MIN_SHARE = 0.05
+
+#: Per-provider assessments MetaDefender publishes for URLs, domains and IPs.
+#: A source that answered with ``""`` (some vendors do, alongside a status
+#: code) assessed nothing, so an empty string is not an opinion either way.
+MD_MALICIOUS_ASSESSMENTS = frozenset({"malicious", "malware", "phishing",
+                                      "spam", "malvertising"})
+MD_CLEAN_ASSESSMENTS = frozenset({"benign", "no_threat", "clean", "safe"})
+
+
+def _md_floor(total: int) -> int:
+    """Fewest flagging vendors needed to call a file verdict out of ``total``."""
+    return max(MD_MIN_DETECTIONS, int(round(total * MD_MIN_SHARE)))
+
+
+class _MetaDefenderQuota:
+    """One key, one allowance and one pace slot for every MetaDefender source."""
+
+    env_key = "MD_API_KEY"
+    homepage = "https://metadefender.com/"
+    quota_key = "metadefender"
+    daily_budget = MD_DAILY_BUDGET
+    budget_env = MD_BUDGET_ENV
+
+    API = "https://api.metadefender.com/v4"
+
+    @property
+    def min_interval(self) -> float:
+        """Seconds between MetaDefender calls, shared by every endpoint."""
+        raw = os.environ.get(MD_MIN_INTERVAL_ENV, "").strip()
+        if not raw:
+            return MD_MIN_INTERVAL
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            return MD_MIN_INTERVAL
+
+    def _headers(self) -> Dict[str, str]:
+        return {"apikey": self.key() or "", "Accept": "application/json"}
+
+    def _refusal(self, r: requests.Response) -> Optional[SourceResult]:
+        """Translate a refusing MetaDefender response, or ``None`` if it is fine."""
+        if r.status_code in (401, 403):
+            return self.result(status="unauthorized", note="invalid apikey")
+        if r.status_code == 404:
+            return self.result(status="not_found")
+        if r.status_code == 429:
+            # The community key allows 500 calls an hour. Holding the whole
+            # process back is what stops the next lookup failing the same way.
+            pace_defer(self.quota_key, _retry_after(r, default=30.0))
+            return self.result(status="error",
+                               note="rate limited (community key: 500/hour)")
+        if r.status_code != 200:
+            return self.result(status="error", note=f"HTTP {r.status_code}")
+        return None
+
+
+def _md_hash_parse(source: Source, data: Dict[str, Any], file_hash: str) -> SourceResult:
+    """Verdict for a file from MetaDefender's multi-engine scan."""
+    scan = data.get("scan_results") or {}
+    total = int(scan.get("total_avs") or 0)
+    mal = int(scan.get("total_detected_avs") or 0)
+    progress = int(scan.get("progress_percentage") or 0)
+    summary = _short(scan.get("scan_all_result_a"), 40)
+    family = _short(data.get("malware_family"), 60)
+
+    detail: Dict[str, Any] = {
+        "engines": True,
+        "malicious": mal,
+        "suspicious": 0,
+        "total_engines": total,
+        "progress": progress,
+        "scanner_verdict": summary,
+        # Kept out of ``threat_label`` on purpose: "Unknown/Eicar!428cbHx5" is
+        # a per-vendor signature string, not a family, and would crowd the
+        # headline with engine noise.
+        "signature": _short(data.get("threat_name"), 120),
+    }
+    if family and _meaningful_family(family):
+        detail["threat_label"] = family
+    info = data.get("file_info") or {}
+    if info:
+        detail["size"] = info.get("file_size")
+        detail["file_type"] = _short(info.get("file_type_description")
+                                     or info.get("file_type"), 60)
+
+    floor = _md_floor(total)
+    if not total:
+        verdict, note = VERDICT_UNKNOWN, "not scanned by MetaDefender"
+    elif mal >= floor:
+        verdict, note = VERDICT_MALICIOUS, f"{mal}/{total} engines flagged"
+    elif mal:
+        # Same rule as VirusTotal: the ratio is worth reporting, the verdict is
+        # not. A stray vendor flag is not a determination about the file.
+        verdict = VERDICT_UNKNOWN
+        detail["low_signal"] = True
+        note = (f"{mal}/{total} engines flagged, below the "
+                f"{floor} needed to call it")
+    elif summary.lower() == "suspicious":
+        verdict = VERDICT_SUSPICIOUS
+        note = f"scanner verdict suspicious, 0/{total} engines flagged"
+    else:
+        verdict, note = VERDICT_CLEAN, f"0/{total} engines"
+    if total and progress < 100:
+        note += f" ({progress}% analysed)"
+
+    return source.result(status="found", verdict=verdict, detections=mal,
+                         total=total, note=note,
+                         link=f"https://metadefender.com/results/file/{file_hash}",
+                         detail=detail)
+
+
+def _md_lookup_parse(source: Source, row: Dict[str, Any],
+                     ind: Indicator) -> SourceResult:
+    """Verdict for a URL, domain or IP from MetaDefender's provider panel."""
+    lr = row.get("lookup_results") or {}
+    sources = [s for s in (lr.get("sources") or []) if isinstance(s, dict)]
+    pairs = [(_short(s.get("assessment"), 40).lower(),
+              _short(s.get("provider"), 60)) for s in sources]
+    flagged = [name for a, name in pairs if a in MD_MALICIOUS_ASSESSMENTS]
+    clean = [name for a, name in pairs if a in MD_CLEAN_ASSESSMENTS]
+    detected = max(len(flagged), int(lr.get("detected_by") or 0))
+    total = len(pairs)
+
+    first_seen: Any = lr.get("start_time")
+    if isinstance(first_seen, (int, float)) and not isinstance(first_seen, bool):
+        try:
+            first_seen = _dt.datetime.utcfromtimestamp(first_seen).strftime("%Y-%m-%d")
+        except (OverflowError, OSError, ValueError):
+            first_seen = None
+
+    detail: Dict[str, Any] = {
+        "providers": total,
+        "flagged_by": flagged[:6],
+        "assessed_clean": len(clean),
+        "first_seen": _short(first_seen, 20),
+    }
+    section = {KIND_URL: "url"}.get(ind.kind,
+                                    "ip" if ind.kind == KIND_IP else "domain")
+    link = f"https://metadefender.com/results/{section}/{ind.value}"
+
+    if not total and not detected:
+        return source.result(status="not_found", note="no provider assessments",
+                             link=link, detail=detail)
+
+    wide = f"{detected}/{total} providers flagged" if total else \
+        f"{detected} provider(s) flagged"
+    if detected >= 2:
+        verdict, note = VERDICT_MALICIOUS, wide
+    elif detected == 1:
+        verdict, note = VERDICT_SUSPICIOUS, wide
+    elif clean:
+        verdict, note = VERDICT_CLEAN, f"0/{total} providers flagged"
+    else:
+        verdict, note = VERDICT_UNKNOWN, "providers made no call"
+    return source.result(status="found", verdict=verdict, detections=detected,
+                         note=note, link=link, detail=detail)
+
+
+class MetaDefenderFile(_MetaDefenderQuota, Source):
+    """MetaDefender Cloud's multi-engine file scan.
+
+    ``GET /v4/hash/{hash}`` answers with ``scan_results.total_avs`` and
+    ``total_detected_avs`` -- the same kind of vendor panel VirusTotal runs,
+    from a different set of sensors. That makes it the second engine sweep a
+    report needs: two panels agreeing is corroboration, and one panel alone
+    stays a lead.
+    """
+
+    name = "metadefender"
+    display = "MetaDefender (files)"
+    kinds = (KIND_HASH,)
+    logic_version = 1
+
+    def lookup(self, ind: Indicator) -> SourceResult:
+        file_hash = ind.preferred_hash()
+        if not file_hash:
+            return self.result(status="skipped", note="no hash to look up")
+        r = self.session().get(f"{self.API}/hash/{file_hash}",
+                               headers=self._headers(), timeout=DEFAULT_TIMEOUT)
+        refused = self._refusal(r)
+        if refused is not None:
+            return refused
+        try:
+            data = r.json() or {}
+        except ValueError:
+            return self.result(status="error", note="bad JSON")
+        return _md_hash_parse(self, data, file_hash=file_hash)
+
+
+class MetaDefenderUrl(_MetaDefenderQuota, Source):
+    """MetaDefender's URL reputation panel.
+
+    Uses ``POST /v4/url`` with a one-element array. The documented
+    ``GET /v4/url/{base64}`` form rejects every encoding we could produce with
+    ``400 400021 Payload is not valid``, so it is not used at all rather than
+    kept as a fallback that always fails.
+    """
+
+    name = "metadefender_url"
+    display = "MetaDefender (URL)"
+    kinds = (KIND_URL,)
+    logic_version = 1
+
+    def lookup(self, ind: Indicator) -> SourceResult:
+        r = self.session().post(f"{self.API}/url", headers=self._headers(),
+                                json={"url": [ind.value]},
+                                timeout=DEFAULT_TIMEOUT)
+        refused = self._refusal(r)
+        if refused is not None:
+            return refused
+        try:
+            data = r.json() or {}
+        except ValueError:
+            return self.result(status="error", note="bad JSON")
+        rows = data.get("data") if isinstance(data, dict) else None
+        row = rows[0] if isinstance(rows, list) and rows else {}
+        if not isinstance(row, dict):
+            row = {}
+        return _md_lookup_parse(self, row, ind)
+
+
+class MetaDefenderDomain(_MetaDefenderQuota, Source):
+    """MetaDefender's domain/IP reputation panel.
+
+    ``GET /v4/domain/{name}`` and ``GET /v4/ip/{addr}`` return the same
+    ``lookup_results.sources`` shape: one row per vendor that has an opinion,
+    with an ``assessment`` of ``benign``, ``no_threat`` or ``malicious``. Two
+    vendors naming the indicator malicious is a determination; one is a lead.
+    """
+
+    name = "metadefender_domain"
+    display = "MetaDefender (domain/IP)"
+    kinds = (KIND_DOMAIN, KIND_IP)
+    logic_version = 1
+
+    def lookup(self, ind: Indicator) -> SourceResult:
+        path = "ip" if ind.kind == KIND_IP else "domain"
+        r = self.session().get(f"{self.API}/{path}/{ind.value}",
+                               headers=self._headers(), timeout=DEFAULT_TIMEOUT)
+        refused = self._refusal(r)
+        if refused is not None:
+            return refused
+        try:
+            data = r.json() or {}
+        except ValueError:
+            return self.result(status="error", note="bad JSON")
+        return _md_lookup_parse(self, data, ind)
+
+
+# ==========================================================================
 # Infrastructure intel (context only, never changes the verdict)
 # ==========================================================================
 
@@ -1272,6 +1545,7 @@ ALL_SOURCES: List[Source] = [
     URLhausPayload(),
     VirusTotalFile(),
     HybridAnalysis(),
+    MetaDefenderFile(),
     MalShare(),
     Triage(),
     # urls
@@ -1279,11 +1553,13 @@ ALL_SOURCES: List[Source] = [
     URLScanUrl(),
     URLhausUrl(),
     VirusTotalUrl(),
+    MetaDefenderUrl(),
     SafeBrowsing(),
     PhishTank(),
     # domains / ip
     AlienVaultOTXDomain(),
     VirusTotalDomain(),
+    MetaDefenderDomain(),
     # intel
     DNSRecords(),
     RDAPWhois(),

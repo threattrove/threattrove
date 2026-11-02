@@ -57,6 +57,7 @@
   <pre class="json"># /etc/threattrove/threattrove.env
 ABUSECH_AUTH_KEY=...      # auth.abuse.ch — MalwareBazaar, ThreatFox, URLhaus
 VT_API_KEY=...            # virustotal.com — files, URLs, domains, IPs
+MD_API_KEY=...            # metadefender.com — files, URLs, domains, IPs
 OTX_API_KEY=...           # otx.alienvault.com (optional, raises limits)
 URLSCAN_API_KEY=...       # urlscan.io (optional, raises limits)
 HA_API_KEY=...            # hybrid-analysis.com
@@ -84,6 +85,21 @@ PHISHTANK_APPKEY=...      # phishtank.com</pre>
     (<code>TT_VT_DOMAINS=1</code> turns it on). A stray engine flag on a shared
     IP address or a popular domain says almost nothing, so this endpoint mostly
     buys noise, and the allowance is better spent on files and URLs.
+  </p>
+  <h2>Second opinion</h2>
+  <p class="note" style="margin-top:0">
+    The MetaDefender sources spend their own key and their own allowance: one
+    counter for the file, URL and domain/IP endpoints together, default 800 a
+    day (<code>TT_MD_DAILY_BUDGET</code>, the community key allows 1000) and one
+    call every 7.2 seconds (<code>TT_MD_MIN_INTERVAL</code>, the key allows 500
+    an hour).
+  </p>
+  <p class="note">
+    Two engine panels are still one kind of evidence. VirusTotal and
+    MetaDefender agree or they do not, but neither can convict a file on its
+    own: both count as the same <em>engine panel</em> authority, and a malicious
+    verdict still needs a second, independent authority — a sample feed, a
+    sandbox, or your own blocklist.
   </p>
 </div>
 {% endblock %}

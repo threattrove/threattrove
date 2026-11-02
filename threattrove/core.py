@@ -22,7 +22,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
 
-VERSION = "2.4.0"
+VERSION = "2.5.0"
 
 DEFAULT_TIMEOUT = float(os.environ.get("TT_TIMEOUT", "20"))
 CACHE_TTL_SECONDS = int(os.environ.get("TT_CACHE_TTL", str(7 * 24 * 3600)))
@@ -89,6 +89,13 @@ AUTHORITY_ALIASES: Dict[str, str] = {
     "virustotal_domain": ENGINE_PANEL_AUTHORITY,
     "hybridanalysis": ENGINE_PANEL_AUTHORITY,
     "triage": ENGINE_PANEL_AUTHORITY,
+    # MetaDefender is a second engine panel, not a second authority: its URL,
+    # domain and IP endpoints are the same vendor's sensors reporting on a
+    # different object. Two panels are two opinions; two endpoints of one panel
+    # are one opinion repeated, so they all collapse onto the same authority.
+    "metadefender": ENGINE_PANEL_AUTHORITY,
+    "metadefender_url": ENGINE_PANEL_AUTHORITY,
+    "metadefender_domain": ENGINE_PANEL_AUTHORITY,
     "urlhaus": "urlhaus",
     "urlhaus_url": "urlhaus",
     "otx": "otx",
@@ -115,7 +122,7 @@ def evidence_authority(source: str) -> str:
 #: routinely accuse genuine vendor software that attackers re-hosted. They can
 #: corroborate, but they cannot convict on their own.
 DIRECT_SOURCES = frozenset({"malwarebazaar", "virustotal", "hybridanalysis",
-                            "triage", "malshare", "local"})
+                            "triage", "malshare", "local", "metadefender"})
 
 #: family labels that name a category rather than a specific family. They are
 #: dropped from ``families()`` so a headline never reads "(Malware)".
@@ -134,7 +141,8 @@ CAMPAIGN_ONLY_CONFIDENCE = 45
 #: Sources whose ``x/y engines`` figure comes from antivirus engines that
 #: actually scanned the artifact. OTX also reports an engine count, but it is
 #: derived from community analysis, so it can corroborate without voting here.
-ENGINE_SOURCES = frozenset({"virustotal", "hybridanalysis", "triage"})
+ENGINE_SOURCES = frozenset({"virustotal", "hybridanalysis", "triage",
+                           "metadefender"})
 
 #: how many engine slots must have reported a clean sweep before that sweep is
 #: allowed to overrule heuristic flags
@@ -248,7 +256,8 @@ EVIDENCE_CLASSES: Tuple[Tuple[str, str, str, Tuple[str, ...]], ...] = (
     ("sandbox", "Sandbox engines",
      "Automated analysis engines that detonated or scanned the artifact",
      ("virustotal", "virustotal_url", "virustotal_domain",
-      "hybridanalysis", "triage")),
+      "hybridanalysis", "triage", "metadefender", "metadefender_url",
+      "metadefender_domain")),
     ("community", "Community intel",
      "Analyst pulses and public scan reports that mention the indicator",
      ("otx", "otx_url", "otx_domain", "urlscan")),
