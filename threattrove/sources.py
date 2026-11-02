@@ -16,6 +16,7 @@ import datetime as _dt
 import json
 import os
 import re
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -1446,19 +1447,58 @@ class CertificateTransparency(Source):
     cache_ttl = 24 * 3600
     min_interval = 1.5
 
+    #: crt.sh builds its answer on demand, and a request for a busy domain can
+    #: wait in that queue for half a minute. This used to be one attempt with a
+    #: 25 s read timeout, so a single slow answer ended the lookup with nothing:
+    #: the canary caught exactly that on its first run. A second connection is
+    #: usually served in a second or two, which buys more than a longer wait on
+    #: the first one would.
+    _TIMEOUT = (10, 15)
+    _RETRY_TIMEOUT = (10, 25)
+    _ATTEMPTS = 2
+
+    def _fetch(
+            self, ind: Indicator
+    ) -> Tuple[Optional[Any], Optional[SourceResult]]:
+        """The certificate list as JSON, and the failure to report if any.
+
+        Retried on a timeout, on a 5xx and on a body that is not JSON: an
+        overloaded crt.sh replies with an HTML error page, which is the same
+        "HTTP 200 that does not mean what it says" this project keeps finding
+        in other providers.
+        """
+        note = "no answer"
+        for attempt in range(self._ATTEMPTS):
+            wait = self._TIMEOUT if attempt == 0 else self._RETRY_TIMEOUT
+            try:
+                r = self.session().get(
+                    "https://crt.sh/",
+                    params={"q": ind.value, "output": "json"}, timeout=wait)
+            except requests.RequestException as exc:
+                note = self.fail(exc).note or "request failed"
+            else:
+                if r.status_code == 200:
+                    try:
+                        data = r.json()
+                    except ValueError:
+                        note = "bad JSON (error page, not a certificate list)"
+                    else:
+                        if isinstance(data, list):
+                            return data, None
+                        note = "unexpected JSON shape"
+                elif r.status_code < 500:
+                    return None, self.result(
+                        status="error", note=f"HTTP {r.status_code}")
+                else:
+                    note = f"HTTP {r.status_code}"
+            time.sleep(1.0 * (attempt + 1))
+        return None, self.result(
+            status="error", note=f"{note} after {self._ATTEMPTS} attempts")
+
     def lookup(self, ind: Indicator) -> SourceResult:
-        try:
-            r = self.session().get(
-                "https://crt.sh/", params={"q": ind.value, "output": "json"},
-                timeout=25)
-        except requests.RequestException as exc:
-            return self.fail(exc)
-        if r.status_code != 200:
-            return self.result(status="error", note=f"HTTP {r.status_code}")
-        try:
-            data = r.json()
-        except ValueError:
-            return self.result(status="error", note="bad JSON")
+        data, failure = self._fetch(ind)
+        if failure is not None:
+            return failure
         if not data:
             return self.result(status="not_found", note="no certificates")
         names, issuers, earliest, latest = set(), set(), "", ""

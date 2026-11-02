@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+
+{% block title %}Privacy — {{ site_name }}{% endblock %}
+
+{% block content %}
+<h1>Privacy</h1>
+<p class="lead">
+  What this instance stores, what it sends upstream, and what it never collects.
+  This describes the software's behaviour; if you run your own copy, it is your
+  notice to edit.
+</p>
+
+<div class="card">
+  <h2>No accounts, no cookies, no trackers</h2>
+  <p class="note" style="margin-top:0">
+    There is no sign-up, no session cookie and no analytics. The page loads its
+    stylesheet, its script and its icon from this host and nothing else, so
+    nothing about your visit is shared with a third party.
+  </p>
+</div>
+
+<div class="card">
+  <h2>What is stored</h2>
+  <p class="note" style="margin-top:0">
+    Each lookup is written to a SQLite file on this server: the indicator (hash,
+    URL, domain or IP), its kind, the verdict, the score and the time. The most
+    recent ones are published at
+    <a href="{{ url_for('recent_page') }}">/recent</a>. No IP address, user agent
+    or referrer is attached to a lookup, and nothing ties two lookups to the same
+    visitor.
+  </p>
+  <p class="note">
+    Rate limiting keeps a per-IP counter in process memory only. It is never
+    written to the database and is gone when the service restarts. A bulk upload
+    is stored in the same database as a job, with the indicators you sent, so
+    that it can be polled and exported.
+  </p>
+  <p class="note">
+    Labels you add to the <a href="{{ url_for('local_page') }}">local corpus</a>
+    are public, notes included. Do not put anything private in a note.
+  </p>
+</div>
+
+<div class="card">
+  <h2>What leaves the server</h2>
+  <p class="note" style="margin-top:0">
+    A lookup is an outward request: the indicator is sent to every active source
+    for its kind — sample repositories, engine APIs, blocklists, DNS resolvers
+    and RDAP registries. That is the point of the service, and it means the
+    indicator is disclosed to those providers under their terms, not this one's.
+    <a href="{{ url_for('sources_page') }}">/sources</a> lists them and the key
+    each one needs. API keys live in the server's environment file and are never
+    sent to a browser or written to a page.
+  </p>
+</div>
+
+<div class="card">
+  <h2>Logs and retention</h2>
+  <p class="note" style="margin-top:0">
+    The web server in front of the app writes ordinary access logs. Those logs
+    include the requested path, and for a search the path carries the indicator
+    in its query string; they are rotated by the system's log configuration and
+    are not joined to the lookup history.
+  </p>
+  <p class="note">
+    Nothing is deleted automatically: the lookup history and the corpus stay
+    until the operator removes them. The whole store is one SQLite file, so an
+    operator can archive or delete it without asking anyone.
+  </p>
+</div>
+{% endblock %}

@@ -179,6 +179,19 @@ def public_base() -> str:
     return f"{proto}://{request.host}"
 
 
+def canonical_base() -> str:
+    """Absolute site root for ``/sitemap.xml`` and ``/robots.txt``.
+
+    A crawler has to be given the name the site is published under, so the
+    configured ``TT_SITE_URL`` wins over whatever Host header arrived. The
+    request-derived origin is only the fallback for a bare install.
+    """
+    configured = os.environ.get("TT_SITE_URL", "").strip().rstrip("/")
+    if configured.startswith(("http://", "https://")):
+        return configured
+    return public_base()
+
+
 def _json_report(report: Any, include_results: bool = True) -> Dict[str, Any]:
     data = report.to_dict(include_results=include_results)
     data["verdict_label"] = VERDICT_LABEL.get(data["verdict"], data["verdict"])
@@ -353,6 +366,7 @@ def create_app(store: Optional[Store] = None) -> Flask:
             "defang": defang,
             "redact": redact,
             "public_base": public_base(),
+            "site_base": canonical_base(),
         }
 
     # -- pages ------------------------------------------------------------
@@ -463,6 +477,68 @@ def create_app(store: Optional[Store] = None) -> Flask:
             return guard
         rt: Runtime = app.extensions["threattrove"]
         return render_template("status.html", status=_status_payload(rt))
+
+    @app.get("/about")
+    def about_page() -> Any:
+        guard = page_guard()
+        if guard:
+            return guard
+        rt: Runtime = app.extensions["threattrove"]
+        rows = _source_rows(rt)
+        return render_template(
+            "about.html", sources=rows, total=len(rows),
+            active=sum(1 for r in rows if r["active"]),
+            keyless=sum(1 for r in rows if r["keyless"]))
+
+    @app.get("/privacy")
+    def privacy_page() -> Any:
+        guard = page_guard()
+        if guard:
+            return guard
+        return render_template("privacy.html")
+
+    @app.get("/robots.txt")
+    def robots_txt() -> Any:
+        """Crawler policy: everything the site wants indexed is public."""
+        body = ("User-agent: *\n"
+                "Allow: /\n"
+                "Disallow: /api/v1/bulk\n"
+                f"Sitemap: {canonical_base()}/sitemap.xml\n")
+        resp = make_response(body, 200)
+        resp.mimetype = "text/plain"
+        resp.headers["Cache-Control"] = "public, max-age=3600"
+        return resp
+
+    @app.get("/sitemap.xml")
+    def sitemap_xml() -> Any:
+        """The publicly linkable pages, in the order people use them.
+
+        Indicator result pages are left out on purpose: they are unbounded, and
+        a crawler walking them would spend provider quota on every one.
+        """
+        base = canonical_base()
+        pages = (
+            ("/", "daily", "1.0"),
+            ("/status", "hourly", "0.8"),
+            ("/sources", "weekly", "0.7"),
+            ("/about", "monthly", "0.6"),
+            ("/recent", "hourly", "0.5"),
+            ("/local", "weekly", "0.5"),
+            ("/api", "monthly", "0.4"),
+            ("/bulk", "monthly", "0.3"),
+            ("/privacy", "yearly", "0.3"),
+        )
+        entries = "".join(
+            f"  <url><loc>{base}{path}</loc><changefreq>{freq}</changefreq>"
+            f"<priority>{prio}</priority></url>\n"
+            for path, freq, prio in pages)
+        xml = ('<?xml version="1.0" encoding="UTF-8"?>\n'
+               '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+               f"{entries}</urlset>\n")
+        resp = make_response(xml, 200)
+        resp.mimetype = "application/xml"
+        resp.headers["Cache-Control"] = "public, max-age=3600"
+        return resp
 
     @app.route("/local", methods=["GET", "POST"])
     def local_page() -> Any:

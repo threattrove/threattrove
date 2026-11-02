@@ -13,6 +13,10 @@ once per invocation and lets systemd pace it (hourly, see the .timer unit).
 The import is idempotent (INSERT OR REPLACE on the local primary key), so the
 48-hour overlap between runs relabels existing rows instead of duplicating them.
 Paths are the ones the systemd unit and nginx config already assume.
+
+The Feodo Tracker C2 IP blocklist is folded in first. It needs no key, so it
+still refreshes on a box without an abuse.ch Auth-Key, and the rows it owns keep
+their first-seen date across runs: they are current intel, not new labels.
 """
 from __future__ import annotations
 
@@ -29,6 +33,7 @@ APP_DIR = "/opt/threattrove"
 PY = "/opt/threattrove/.venv/bin/python"
 RUN_AS = "threattrove"
 URL = "https://mb-api.abuse.ch/v2/files/exports/{key}/recent.csv"
+FEODO_SCRIPT = "/opt/threattrove/scripts/import_feodo.py"
 
 
 def read_env() -> dict:
@@ -71,8 +76,25 @@ def fetch(key: str) -> int:
     raise SystemExit(f"download failed after 3 attempts: {last}")
 
 
+def refresh_feodo(env: dict) -> None:
+    """Fold the Feodo C2 IP blocklist into the corpus. Keyless, best effort.
+
+    A failure here is printed and does not change the job's exit status: the
+    dump refresh below is the one an operator has to hear about, and a
+    transient abuse.ch outage should not look like a broken MalwareBazaar key.
+    """
+    proc = subprocess.run(
+        ["sudo", "-u", RUN_AS, "env", f"TT_DB={env.get('TT_DB', '')}",
+         PY, FEODO_SCRIPT],
+        cwd=APP_DIR, capture_output=True, text=True)
+    sys.stdout.write(proc.stdout)
+    if proc.returncode != 0:
+        sys.stderr.write("feodo refresh failed:\n" + proc.stderr)
+
+
 def main() -> int:
     env = read_env()
+    refresh_feodo(env)
     key = env.get("ABUSECH_AUTH_KEY", "")
     if not key:
         print("ABUSECH_AUTH_KEY missing from env file", file=sys.stderr)

@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+
+{% block title %}About — {{ site_name }}{% endblock %}
+
+{% block content %}
+<h1>About {{ site_name }}</h1>
+<p class="lead">
+  A reputation lookup that says what it knows and, just as often, what it does
+  not. Paste a hash, a URL, a domain or an IP: {{ site_name }} asks every source
+  this deployment is configured for, in parallel, and prints one verdict with
+  the evidence underneath it.
+</p>
+
+<div class="card">
+  <h2>What it is</h2>
+  <p class="note" style="margin-top:0">
+    {{ total }} sources are compiled in, {{ keyless }} of them answer without
+    any key, and {{ active }} are active on this instance. Engine panels, sample
+    feeds, blocklists and enrichment services each get their own row with a
+    status, a note and — where the provider reports one — an engine ratio.
+    <a href="{{ url_for('sources_page') }}">The source catalogue</a> lists what
+    each one contributes; <a href="{{ url_for('status_page') }}">status</a> shows
+    what answered the last time the canary asked.
+  </p>
+</div>
+
+<div class="card">
+  <h2>How a verdict is reached</h2>
+  <p class="note" style="margin-top:0">
+    Corroboration decides, not a sum of vendor points. Two independent
+    authorities that say malicious convict; a single feed hit is reported as a
+    lead, because a lone list entry is frequently a stale sample or an
+    over-broad signature. Confidence grades agreement rather than adding
+    points — 45% for one source, 75% for two, 88% for three, 93% for four — with
+    a small bonus when an engine panel agrees, capped at 98.
+  </p>
+  <p class="note">
+    Two rules keep noise out. <strong>Direct evidence</strong>: a feed records
+    where a copy was served from, so only a source that examined the file (a
+    sample repository, an engine scan, a sandbox, your own corpus) can convict
+    on its own. <strong>Engine clearance</strong>: when every engine that ran
+    reports zero detections over at least two slots, heuristic-only suspicion is
+    demoted to CLEAN and the sources still flagging it are named. Sources in the
+    <em>intel</em> category — DNS, RDAP, Certificate Transparency, reverse IP —
+    enrich a report and never move the verdict.
+  </p>
+  <p class="note">
+    Every result page carries a <em>What decided this</em> panel: the weight each
+    evidence class contributed, what the verdict would have been if a source had
+    missed or joined, and the structural caveats. Those counterfactuals are
+    produced by re-running the real verdict rules, not written by hand, so they
+    cannot drift away from the code.
+  </p>
+</div>
+
+<div class="card">
+  <h2>Your own corpus</h2>
+  <p class="note" style="margin-top:0">
+    A label you add at <a href="{{ url_for('local_page') }}">/local</a> — or a
+    blocklist you import — is a decision about that exact indicator by the person
+    running this instance, so it outranks every upstream feed and is shown
+    first. That is also why it is public: entries are listed for anyone who
+    asks. Imported feeds (MalwareBazaar's recent additions, the Feodo Tracker C2
+    list) land in the same table on a timer and keep their first-seen date.
+  </p>
+</div>
+
+<div class="card">
+  <h2>What it does not do</h2>
+  <p class="note" style="margin-top:0">
+    It never uploads a file: hashing happens locally and only the digest leaves
+    the machine. Keyless sources are free and shallow, so a miss there is
+    <em>no data</em>, never <em>safe</em> — an unresolved indicator reads UNKNOWN
+    on purpose. There are no accounts and no cookies.
+  </p>
+  <p class="note">
+    Source code:
+    <a href="https://github.com/threattrove/threattrove">github.com/threattrove/threattrove</a>
+    (MIT). API: <a href="{{ url_for('api_docs') }}">/api</a>. What is stored and
+    what leaves the box: <a href="{{ url_for('privacy_page') }}">/privacy</a>.
+  </p>
+</div>
+
+<p class="note muted">{{ site_name }} v{{ version }} · {{ active }} of {{ total }} sources active on this instance</p>
+{% endblock %}

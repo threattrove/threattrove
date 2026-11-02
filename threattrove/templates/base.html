@@ -12,7 +12,7 @@
   <meta property="og:type" content="{% block og_type %}website{% endblock %}">
   <meta property="og:title" content="{% block og_title %}{{ site_name }}{% endblock %}">
   <meta property="og:description" content="{% block og_description %}Reputation lookup for file hashes, URLs and domains.{% endblock %}">
-  <meta property="og:url" content="{% block og_url %}{{ public_base }}{{ request.path }}{% endblock %}">
+  <meta property="og:url" content="{% block og_url %}{{ site_base }}{{ request.path }}{% endblock %}">
   <meta name="twitter:card" content="{% block twitter_card %}summary{% endblock %}">
   {% block og_extra %}{% endblock %}
 </head>
@@ -45,6 +45,7 @@
       <a href="{{ url_for('sources_page') }}" {% if request.endpoint == 'sources_page' %}class="active"{% endif %}>Sources</a>
       <a href="{{ url_for('status_page') }}" {% if request.endpoint == 'status_page' %}class="active"{% endif %}>Status</a>
       <a href="{{ url_for('api_docs') }}" {% if request.endpoint == 'api_docs' %}class="active"{% endif %}>API</a>
+      <a href="{{ url_for('about_page') }}" {% if request.endpoint == 'about_page' %}class="active"{% endif %}>About</a>
     </nav>
   </div>
 </header>
@@ -62,6 +63,10 @@
     <a href="{{ url_for('status_page') }}">Status</a>
     <span class="dot">·</span>
     <a href="{{ url_for('api_docs') }}">API</a>
+    <span class="dot">·</span>
+    <a href="{{ url_for('about_page') }}">About</a>
+    <span class="dot">·</span>
+    <a href="{{ url_for('privacy_page') }}">Privacy</a>
     <span class="grow"></span>
     <span class="muted">&copy; {{ years }}</span>
   </div>

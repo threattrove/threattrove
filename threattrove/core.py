@@ -22,7 +22,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
 
-VERSION = "2.8.0"
+VERSION = "2.9.0"
 
 DEFAULT_TIMEOUT = float(os.environ.get("TT_TIMEOUT", "20"))
 CACHE_TTL_SECONDS = int(os.environ.get("TT_CACHE_TTL", str(7 * 24 * 3600)))
@@ -1487,6 +1487,41 @@ class Store:
             after = self.conn.execute("SELECT COUNT(*) FROM local").fetchone()[0]
         inserted = after - before
         return inserted, total - inserted
+
+    def sync_local_many(self, rows: Iterable[Tuple[str, str, str]],
+                        label: str, chunk_size: int = 2000) -> int:
+        """Keep a feed's rows in the corpus without re-dating them.
+
+        ``add_local_many`` replaces a row, which resets ``added_at``. For a
+        feed refreshed every hour that would walk the same few hundred values
+        back to the top of ``/local`` on every run and bury what an analyst
+        entered by hand. A row that is already stored keeps its first-seen
+        timestamp and only has its label and note refreshed; a new row is
+        inserted now.
+
+        *rows* are ``(kind, value, note)`` triples, so each indicator carries
+        its own note. Returns the number of rows written.
+        """
+        sql = ("INSERT INTO local (kind, value, label, note, added_at)"
+               " VALUES (?,?,?,?,?)"
+               " ON CONFLICT(kind, value) DO UPDATE SET label=excluded.label,"
+               " note=excluded.note")
+        now = time.time()
+        written = 0
+        buf: List[Tuple[str, str, str, str, float]] = []
+        for kind, value, note in rows:
+            buf.append((kind, (value or "").lower(), label, note, now))
+            written += 1
+            if len(buf) >= chunk_size:
+                with self._lock:
+                    self.conn.executemany(sql, buf)
+                    self.conn.commit()
+                buf = []
+        if buf:
+            with self._lock:
+                self.conn.executemany(sql, buf)
+                self.conn.commit()
+        return written
 
     def count_local_in(self, kind: str, values: Sequence[str]) -> int:
         """How many of *values* are already stored for *kind*."""

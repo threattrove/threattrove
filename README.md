@@ -7,22 +7,33 @@ indicator, get a verdict, and see *which* sources said what. It runs keyless out
 of the box (9 sources, no account anywhere) and gets sharper as you add API keys.
 
 ```
-$ threattrove 44d88612fea8a8f36de82e1278abb02f
+$ threattrove 275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f
 
-━━ 44d88612fea8a8f36de82e1278abb02f
+━━ 275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f
 
   File hash
-  MALICIOUS    75% confidence    Listed as malicious by 2 independent sources
+  MALICIOUS    93% confidence    Listed as malicious by 4 independent sources, and 67/76 engines agree (virus.eicar/test)
+  detections  67/76
 
   SECURITY SOURCES
   ──────────────────────────────────────────────────────────────────────────
   ● circl            MALICIOUS          listed by malshare.com
-  ● otx              MALICIOUS          50 pulse(s)
+  ● otx              MALICIOUS          49 pulse(s), 1 no-threat pulse(s) ignored
+  ○ malwarebazaar    UNKNOWN
+  ? threatfox        UNKNOWN
+  ○ urlhaus          UNKNOWN
+  ● virustotal       MALICIOUS  66/75   66/75 engines flagged
+  ● hybridanalysis   MALICIOUS  1/1     1/1 scanner(s) flagged - EICAR
+  ○ malshare         UNKNOWN
 
-  elapsed 1.14s  ·  2 security sources queried
+  elapsed 0.48s  ·  8 security sources queried
 ```
 
-That's the EICAR test file, found by two keyless sources with no API key set.
+That is the EICAR test file on an install with every key set. Take the keys away
+and the same hash reads `SUSPICIOUS 45%`: CIRCL and OTX both call it malicious,
+but neither examined the file, so corroboration on its own is a lead rather than
+a conviction. That distinction is the whole point — see
+[How a verdict is produced](#how-a-verdict-is-produced).
 
 ---
 
@@ -120,15 +131,20 @@ lands around 140 MB of SQLite — plan disk accordingly.
 
 | Page | What it does |
 | --- | --- |
-| `/` | Paste a hash, URL or domain; recent lookups |
-| `/i/hash?q=…`, `/i/url?q=…`, `/i/domain?q=…` | Result page: verdict, score, per-source table |
+| `/` | Paste a hash, URL, domain or IP; recent lookups |
+| `/search?q=…` | Resolve any indicator and redirect to its result page |
+| `/i/<kind>?q=…` | Result page: verdict, score, per-source table, what decided it |
 | `/bulk` | Upload a CSV/feed or paste a list; runs as a background job |
 | `/bulk/<job_id>` | Job progress, per-row verdicts, CSV/JSON export |
-| `/recent` | Recent lookups on this instance |
+| `/recent` | The last 200 lookups on this instance |
 | `/sources` | Source catalogue with live state (`active` / `needs key` / `opt-in`) |
-| `/local` | Manage the local corpus: search by prefix, paged |
+| `/local` | The local corpus: 50 rows a page, filter by kind, search a value, add or delete |
 | `/status` | Per-source health: last canary answer, latency, drift, and what is not answering |
+| `/about` | What the verdict rules are, what the tool does not claim, and who it is for |
+| `/privacy` | What is stored, what is sent upstream, what is never collected |
 | `/api` | JSON API documentation |
+| `/sitemap.xml`, `/robots.txt` | Crawler index and policy, absolute URLs from `TT_SITE_URL` |
+| `/health`, `/healthz` | Liveness JSON: `{"status":"ok","version":"…"}` |
 
 ---
 
@@ -298,6 +314,8 @@ anonymous hash.
 ## Sources
 
 24 sources are compiled in; 9 work with no key. `httpx`-free HTTP via `requests`.
+Feodo Tracker's C2 list is not an HTTP source at all: it is imported into the
+local corpus instead (see [Keeping the local blocklist current](#keeping-the-local-blocklist-current)).
 
 | Source | Kind | Category | Key | Env var |
 | --- | --- | --- | --- | --- |
@@ -330,6 +348,14 @@ Notes:
 * abuse.ch (MalwareBazaar, ThreatFox, URLhaus) requires a free Auth-Key from
   <https://auth.abuse.ch/> since API 3.0.0. A bad key answers **403**, which
   ThreatTrove reports as `unauthorized` — the run continues.
+* Feodo Tracker needs no key and is never queried live: `scripts/import_feodo.py`
+  folds abuse.ch's C2 IP list — address, port, malware family, last online — into
+  the `local` table as `kind=ip`, where the corpus is consulted before any
+  upstream source. A hit therefore survives an upstream outage, and a C2 that
+  drops off the feed keeps its last label instead of vanishing.
+  abuse.ch's larger `ipblocklist_aggressive.csv` (~8,000 addresses,
+  almost all offline since 2022) is deliberately not imported: those
+  addresses have mostly been reassigned to someone else by now.
 * `TT_ENABLE_REVERSE_IP` is off by default because that lookup sends the queried
   IP/hostname to a third-party service. That's the one source gated on consent.
 * `TT_VT_DOMAINS` is off by default for a different reason. VirusTotal's
@@ -501,6 +527,19 @@ systemctl enable --now threattrove-refresh.timer
 systemctl start threattrove-refresh.service      # run once now
 ```
 
+Feodo Tracker's C2 list rides along in the same hourly job, and needs no key:
+
+```bash
+# one-off, or leave it to threattrove-refresh.timer
+sudo -u threattrove env TT_DB=/var/lib/threattrove/threattrove.db \
+  /opt/threattrove/.venv/bin/python scripts/import_feodo.py --dry-run
+```
+
+`threattrove-refresh` runs the import first, before it checks for the abuse.ch
+key: a failure prints a warning and the MalwareBazaar refresh still happens. Rows
+are updated in place (`ON CONFLICT DO UPDATE`), so re-importing the same IPs each
+hour does not churn `added_at` or reshuffle `/local`.
+
 ### Checking that the sources still answer
 
 A source can break without failing: it answers HTTP 200 with a document that
@@ -572,9 +611,11 @@ threattrove/
   bulk.py       CSV/JSON/newline parsing, job runner, CSV export
   cli.py        `threattrove` entry point
   web.py        Flask app factory + `threattrove-web`
+  feeds.py      blocklist parsing (Feodo Tracker C2 CSV → local rows)
   templates/    Jinja2 views
   static/       app.js, style.css, favicon.svg
 scripts/smoke.py        offline parser/verdict checks + live lookups
+scripts/import_feodo.py Feodo C2 import into the local corpus
 deploy/                 gunicorn, systemd, nginx, env example, blocklist refresh
 legacy/threattrove-v1-cli.py   original single-file CLI (superseded, kept for reference)
 Dockerfile, docker-compose.yml
@@ -595,6 +636,8 @@ Dockerfile, docker-compose.yml
 .venv/bin/python scripts/check_cards.py       # evidence cards and page rendering (offline)
 .venv/bin/python scripts/check_privacy.py     # no queried value leaks to the page or logs (offline)
 .venv/bin/python scripts/check_status.py      # /local paging and search, source-health states, /status and /api/v1/status (offline)
+.venv/bin/python scripts/check_feodo.py       # Feodo parsing, in-place re-import, local-corpus verdict (offline)
+.venv/bin/python scripts/check_docs.py        # /about, /privacy, /sitemap.xml, /robots.txt (offline)
 ```
 
 ## Limitations
@@ -604,6 +647,9 @@ Dockerfile, docker-compose.yml
   never "safe". Treat `UNKNOWN` as unknown.
 * No user accounts, no per-user quota: the rate limiter is per IP, meant for a
   single node behind a proxy.
+* Nothing is authenticated, including `/local` and `/api/v1/bulk`. Anyone who can
+  reach the port can read the corpus and add or delete rows. Put it behind your
+  proxy's auth, or keep it on a private network.
 * Bulk jobs run inside the web worker process. Two workers means two independent
   job pools (fine for this scale; swap in a real queue if you outgrow it).
 * Cached verdicts are not re-derived until an entry expires or its source's

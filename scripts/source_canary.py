@@ -142,14 +142,21 @@ def main() -> int:
                       f"{result.status:<12}{row['latency_ms']:>6} ms{suffix}{note}")
 
     counts = {state: sum(1 for c in checks if c["state"] == state)
-              for state in ("ok", "warn", "bad")}
-    summary = {"checked": len(checks), "failed": bad, "states": counts,
+              for state in ("ok", "warn", "bad", "skip")}
+    # A source that was not asked -- its allowance is spent, or a sibling
+    # endpoint of the same provider was just called -- says nothing either way.
+    # Counting it as "checked" claimed two more checks than the run made, so it
+    # is reported apart from the sources that actually answered. The exit code
+    # still depends only on the ones that failed.
+    answered = counts["ok"] + counts["warn"] + counts["bad"]
+    summary = {"checked": answered, "probed": len(checks),
+               "skipped": counts["skip"], "failed": bad, "states": counts,
                "dry_run": bool(args.dry_run)}
     if args.json:
         print(json.dumps({"summary": summary, "checks": checks}, indent=2))
     else:
         print(f"\n{counts['ok']} ok, {counts['warn']} warn, {counts['bad']} bad"
-              f" of {len(checks)} source(s) checked")
+              f", {counts['skip']} not asked of {len(checks)} source(s) probed")
         if bad:
             print("failing sources: "
                   + ", ".join(c["source"] for c in checks
