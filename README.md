@@ -378,6 +378,16 @@ Notes:
   scanner agreement and no named family is reported as `suspicious`, not
   `malicious`, because installers trip behavioural heuristics — an official
   7-Zip installer scores 75 with every engine clean.
+* MalShare is read through `GET /api.php?action=details&hash=…&api_key=…`, and
+  a found sample counts as a direct authority (it has the file). Until 2.7.0
+  the source asked for `action=getdetails`, which MalShare answers with **200
+  and a zero-length body** — indistinguishable from a miss — so every lookup
+  was cached as `not_found` and the source never contributed a verdict. An
+  empty or non-JSON body is now `error`, never a miss. A stored sample is
+  `malicious` weight; like any lone authority it reports `suspicious` on its
+  own and convicts beside an engine panel or the local corpus. The free tier
+  allows 2000 calls a day, so a `429` is reported as `error` naming that
+  allowance rather than as a miss.
 
 ---
 
@@ -548,6 +558,7 @@ Dockerfile, docker-compose.yml
 .venv/bin/python scripts/check_quota.py       # shared allowance, skipped answers, sources page (offline)
 .venv/bin/python scripts/check_metadefender.py # second engine panel: parsing, floor, quota share (offline; --live adds real calls)
 .venv/bin/python scripts/check_gsb.py         # Safe Browsing and PhishTank: flags, refusals, "no data" (offline; --live adds real calls)
+.venv/bin/python scripts/check_malshare.py    # MalShare action/status contract, silence is not a miss (offline; --live adds real calls)
 .venv/bin/python scripts/check_corroboration.py  # authority collapsing and corroboration (offline)
 .venv/bin/python scripts/check_refang.py      # defanged indicators (offline)
 .venv/bin/python scripts/check_cards.py       # evidence cards and page rendering (offline)

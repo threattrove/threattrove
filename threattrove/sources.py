@@ -567,29 +567,70 @@ class MalShare(Source):
     env_key = "MALSHARE_API_KEY"
     homepage = "https://malshare.com/"
     kinds = (KIND_HASH,)
+    logic_version = 2       # 2.7.0: the action is `details`, not `getdetails`
 
+    #: MalShare's API contract, as observed against the live service:
+    #:   known hash    -> 200 + {MD5, SHA1, SHA256, SSDEEP, F_TYPE, SIZE, FILENAMES}
+    #:   unknown hash  -> 404 + {"ERROR":{"CODE":404,"MESSAGE":"Sample not found"}}
+    #:   bad key       -> 400 + plain text "User specified in `api_key` ... does not exist"
+    #:   no key        -> 400 + plain text "No key specified in `api_key` ..."
+    #: A wrong action name answers 200 with an empty body, which is why the old
+    #: parser read every lookup as "not in the corpus" and the source never hit.
     def lookup(self, ind: Indicator) -> SourceResult:
         h = ind.preferred_hash()
         r = self.session().get(
             "https://malshare.com/api.php",
-            params={"api_key": self.key(), "action": "getdetails", "hash": h},
+            params={"api_key": self.key(), "action": "details", "hash": h},
             timeout=DEFAULT_TIMEOUT)
-        if r.status_code == 403:
+        body = ""
+        try:
+            body = (r.text or "")[:400]
+        except Exception:
+            body = ""
+
+        if r.status_code in (401, 403):
             return self.result(status="unauthorized", note="invalid API key")
+        if r.status_code == 400:
+            # MalShare reports a refused key as 400 with a plain-text sentence,
+            # not the 401/403 the old code waited for.
+            if "api_key" in body:
+                return self.result(status="unauthorized", note="invalid API key")
+            return self.result(status="error", note="HTTP 400")
+        if r.status_code == 404:
+            return self.result(status="not_found", note="not in MalShare")
+        if r.status_code == 429:
+            return self.result(status="error",
+                               note="quota exceeded (2000 calls/day)")
         if r.status_code != 200:
             return self.result(status="error", note=f"HTTP {r.status_code}")
         try:
             data = r.json()
         except ValueError:
-            return self.result(status="not_found")
-        if not data or (isinstance(data, dict) and data.get("ERROR")):
-            return self.result(status="not_found")
-        entry = data[0] if isinstance(data, list) else data
+            # Silence is a failure, not a miss: the withdrawn action name used to
+            # land here and was reported as "not_found", hiding a dead source.
+            return self.result(status="error", note="empty or non-JSON response")
+
+        if isinstance(data, dict) and data.get("ERROR"):
+            err = data.get("ERROR")
+            code = str(err.get("CODE", "")) if isinstance(err, dict) else ""
+            if code == "404":
+                return self.result(status="not_found", note="not in MalShare")
+            return self.result(status="error", note=f"MalShare error {code}".strip())
+        if isinstance(data, list):
+            data = data[0] if data else None
+        if not isinstance(data, dict) or not data:
+            return self.result(status="error", note="unexpected response shape")
+
+        names = data.get("FILENAMES") or []
+        if isinstance(names, str):
+            names = [names]
+        ftype = data.get("F_TYPE") or ""
+        note = f"sample in MalShare ({ftype})" if ftype else "sample in MalShare"
         return self.result(
-            status="found", verdict=VERDICT_MALICIOUS,
-            note="sample in MalShare",
+            status="found", verdict=VERDICT_MALICIOUS, note=note,
             link=f"https://malshare.com/sample.php?action=detail&hash={h}",
-            detail={"type": entry.get("F_TYPE"), "sources": entry.get("SOURCES")})
+            detail={"type": ftype or None, "size": data.get("SIZE"),
+                    "filenames": [str(n) for n in names[:3]] or None})
 
 
 class Triage(Source):

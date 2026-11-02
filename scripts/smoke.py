@@ -665,8 +665,9 @@ def cache_logic() -> None:
     from threattrove.sources import ALL_SOURCES
     bumped = sorted(s.name for s in ALL_SOURCES if s.logic_version > 1)
     # 2.6.0 adds gsb (an unlisted URL is no data, not a clearance) and
-    # phishtank ("n" is not a truthy flag).
-    check(bumped == ["gsb", "hybridanalysis", "otx", "otx_domain",
+    # phishtank ("n" is not a truthy flag). 2.7.0 adds malshare (the old
+    # action name answered 200 with an empty body and cached a false miss).
+    check(bumped == ["gsb", "hybridanalysis", "malshare", "otx", "otx_domain",
                      "otx_url", "phishtank", "virustotal",
                      "virustotal_domain", "virustotal_url"],
           f"sources with corrected verdict logic: {bumped}")
