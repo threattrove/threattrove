@@ -22,7 +22,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
 
-VERSION = "2.10.1"
+VERSION = "2.10.2"
 
 DEFAULT_TIMEOUT = float(os.environ.get("TT_TIMEOUT", "20"))
 CACHE_TTL_SECONDS = int(os.environ.get("TT_CACHE_TTL", str(7 * 24 * 3600)))
@@ -1422,6 +1422,24 @@ class Store:
             self.conn.commit()
             return cur.rowcount > 0
 
+    def refund_quota(self, quota: str, count: int = 1) -> None:
+        """Give back a reservation for a call that was never made.
+
+        ``take_quota`` reserves before the request so that a crash mid-call
+        cannot overspend the day. A call that never leaves the process -- held
+        back by pacing, for instance -- should not count against the day, so
+        the reservation is released here. The counter never drops below zero.
+        """
+        day = _utc_day()
+        refund = max(0, int(count))
+        if not refund:
+            return
+        with self._lock:
+            self.conn.execute(
+                "UPDATE quota SET used=MAX(0, used-?) WHERE quota=? AND day=?",
+                (refund, quota, day))
+            self.conn.commit()
+
     def exhaust_quota(self, quota: str, limit: Optional[int] = None) -> None:
         """Stop asking *quota* for the rest of the UTC day.
 
@@ -2054,6 +2072,10 @@ class Engine:
 
         if not self._pace(source):
             key = source.quota_key or source.name
+            # The reservation above is for a request this source never made: it
+            # was held back, not charged. Give the credit back so a paced call
+            # costs nothing and a caller that waits and retries pays once.
+            self._refund(source)
             return source.result(
                 status="skipped",
                 note=(f"held back to stay inside the {key} rate limit "
@@ -2081,6 +2103,15 @@ class Engine:
             except sqlite3.Error:
                 pass
         return res
+
+    def _refund(self, source: Source) -> None:
+        """Release the allowance reserved for a call that was not made."""
+        if not (source.quota_key and self.store):
+            return
+        try:
+            self.store.refund_quota(source.quota_key)
+        except sqlite3.Error:
+            pass
 
     def _quota_exhausted(self, source: Source, limit: Optional[int]) -> SourceResult:
         """The result for a source whose daily allowance is spent."""

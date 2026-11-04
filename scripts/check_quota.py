@@ -238,6 +238,52 @@ def virus_total() -> None:
     check(not core.quota_exhausted_note("HTTP 503"), "other errors change nothing")
 
 
+def pacing() -> None:
+    print("\n[pacing]")
+    with tempfile.TemporaryDirectory() as tmp:
+        store = new_store(tmp)
+        calls = Calls()
+        src = Counting(calls)
+        src.min_interval = 60.0      # one call a minute on this key
+        eng = core.Engine(sources=[src], store=store)
+
+        first = eng.lookup(core.parse_indicator("ab" * 32))
+        check(first.results[0].status == "found" and calls.n == 1,
+              "the first call on a paced key is allowed through")
+        check(store.quota_state("stub")["used"] == 1, "and charged once")
+
+        saved = core.PACE_MAX_WAIT
+        core.PACE_MAX_WAIT = 0.0     # never wait: report the hold-back
+        try:
+            held = eng.lookup(core.parse_indicator("cd" * 32))
+        finally:
+            core.PACE_MAX_WAIT = saved
+        row = held.results[0]
+        check(calls.n == 1, "a paced lookup does not reach upstream")
+        check(row.status == "skipped" and row.detail.get("paced") == "stub",
+              f"and says it was held back: {row.note!r}")
+        check(store.quota_state("stub")["used"] == 1,
+              "a held-back call is refunded, not charged")
+        check(store.get_cached("hash", "cd" * 32, "counting") is None,
+              "and nothing is cached for it")
+
+        # This is what the canary does: wait the window out, then ask again.
+        core._PACE_NEXT.pop("stub", None)
+        again = eng.lookup(core.parse_indicator("cd" * 32))
+        check(again.results[0].status == "found" and calls.n == 2,
+              "the retry after the window reaches upstream")
+        check(store.quota_state("stub")["used"] == 2,
+              "and the paused-and-retried source costs one credit, not two")
+
+        # A refund can never push the counter below zero.
+        store.refund_quota("stub")
+        store.refund_quota("stub")
+        store.refund_quota("stub")
+        check(store.quota_state("stub")["used"] == 0,
+              "refunds stop at zero rather than going negative")
+        store.close()
+
+
 def sources_page() -> None:
     print("\n[sources page]")
     with tempfile.TemporaryDirectory() as tmp:
@@ -264,6 +310,7 @@ def sources_page() -> None:
 def main() -> int:
     ledger()
     engine()
+    pacing()
     virus_total()
     sources_page()
     print()

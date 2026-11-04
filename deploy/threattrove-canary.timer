@@ -2,9 +2,12 @@
 Description=Four-hourly ThreatTrove source-health canary
 
 [Timer]
-# A run costs one live request per active source. Four hours catches a feed
-# that broke after an upstream change while spending about six VirusTotal
-# lookups a day out of a 500-a-day allowance. The offset minute keeps it away
+# A run spends one credit per allowance-backed source it probes, not one per
+# source row: VirusTotal's hash, URL and domain endpoints share one key (and
+# the domain endpoint is off unless TT_VT_DOMAINS is set), and MetaDefender's
+# do the same. So a run costs 2 VirusTotal + 3 MetaDefender credits, about
+# 12 VT and 18 MD a day across the six runs; a paced probe is refunded, so a
+# held-back request is never charged twice. The offset minute keeps it away
 # from the hourly blocklist refresh.
 OnCalendar=*-*-* 00/4:17:00
 RandomizedDelaySec=300
