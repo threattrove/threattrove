@@ -11,6 +11,11 @@ only make it slow. This check pins that down: a broken source fails, stale
 canary data fails (the timer may be dead), a fresh warning does not fail unless
 the caller asked for ``strict=warn``, and no ``strict`` argument never fails.
 
+Since 2.11.0 a third-party outage is a separate state: two remote failures in a
+row make a source ``degraded``, which is explained on /status but does not wake
+the ``strict=1`` pager until it has outlasted ``DEGRADED_PAGE_HOURS``, or until
+the caller asks for ``strict=degraded``/``strict=warn``.
+
 Nothing here touches the network or the production database: the rows are
 written straight into a temporary SQLite file and the app is driven through
 Flask's test client. Exits non-zero if any expectation fails.
@@ -30,7 +35,12 @@ sys.path.insert(0, os.path.dirname(HERE))
 _TMP = tempfile.mkdtemp(prefix="tt-monitor-check-")
 os.environ["TT_DB"] = os.path.join(_TMP, "check.db")
 
-from threattrove.core import Store  # noqa: E402
+from threattrove.core import (  # noqa: E402
+    DEGRADED_PAGE_HOURS,
+    FAILURE_CONTRACT,
+    FAILURE_REMOTE,
+    Store,
+)
 from threattrove.web import (  # noqa: E402
     HEALTH_STALE_SECONDS,
     _source_rows,
@@ -57,22 +67,29 @@ def active_names() -> list:
 
 def put(row: str, status: str = "found", *, age: float = 60.0,
         latency: int = 100, drift: float | None = None,
-        note: str = "") -> None:
+        note: str = "", failure: str = "", streak: int = 0,
+        degraded_age: float | None = None) -> None:
     """Write one canary row, ``age`` seconds old, without running a canary."""
     store = runtime()
     now = time.time()
+    since = (None if not streak
+             else now - (age if degraded_age is None else degraded_age))
     with store._lock:                       # noqa: SLF001 - a check may be direct
         store.conn.execute(
             "INSERT INTO source_health (source, kind, indicator, status,"
             " verdict, note, latency_ms, checked_at, expected, baseline_ms,"
-            " baseline_at, drift) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
+            " baseline_at, drift, failure, fail_streak, degraded_since)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
             " ON CONFLICT(source) DO UPDATE SET status=excluded.status,"
             " note=excluded.note, latency_ms=excluded.latency_ms,"
             " checked_at=excluded.checked_at, expected=excluded.expected,"
             " baseline_ms=excluded.baseline_ms, baseline_at=excluded.baseline_at,"
-            " drift=excluded.drift",
+            " drift=excluded.drift, failure=excluded.failure,"
+            " fail_streak=excluded.fail_streak,"
+            " degraded_since=excluded.degraded_since",
             (row, "hash", "44d88612fea8a8f36de82e1278abb02f", status, "",
-             note, latency, now - age, "found", 100.0, now - age, drift))
+             note, latency, now - age, "found", 100.0, now - age, drift,
+             failure, streak, since))
         store.conn.commit()
 
 
@@ -123,6 +140,57 @@ def main() -> int:
     check(resp.status_code == 503, "a bad source fails strict=1")
     check(data["counts"]["bad"] == 1, "exactly the broken source is counted bad")
     check(data["stale_count"] == 0, "a fresh failure is not reported as stale")
+
+    print("strict=1: third-party outage (degraded)")
+    drop_all()
+    for name in names:
+        put(name)
+    # Two remote failures in a row: the crt.sh shape, where the provider's
+    # edge answers 502 and nothing on this host can change that.
+    put(first, "error", note="HTTP 502 after 3 attempts",
+        failure=FAILURE_REMOTE, streak=2, degraded_age=900)
+    resp, data = get(client, "?strict=1")
+    check(resp.status_code == 200,
+          "a provider outage does not wake the pager")
+    check(data["status"] == "degraded", "the payload calls it degraded")
+    check(data["degraded_count"] == 1, "degraded_count counts it")
+    check(data["counts"]["degraded"] == 1 and data["counts"]["bad"] == 0,
+          "and it is not counted as bad")
+    check(data["sources"][0]["name"] == first,
+          "the degraded row sorts above the healthy ones")
+    check(data["sources"][0]["failure"] == FAILURE_REMOTE,
+          "the row says the fault is upstream")
+    resp, _ = get(client, "?strict=degraded")
+    check(resp.status_code == 503, "strict=degraded fails on the outage")
+    check(resp.headers.get("X-ThreatTrove-Strict") == "degraded",
+          "and the header names the mode")
+    resp, _ = get(client, "?strict=warn")
+    check(resp.status_code == 503, "strict=warn fails on it too")
+    resp, _ = get(client, "?strict=1")
+    check(resp.headers.get("X-ThreatTrove-Strict") == "1",
+          "strict=1 says so in the header while answering 200")
+    body = client.get("/status").get_data(as_text=True)
+    check("degraded" in body and "provider itself is down" in body,
+          "the page explains it is the provider, not us")
+
+    print("strict=1: an outage that outlasts the page window")
+    put(first, "error", note="HTTP 502 after 3 attempts",
+        failure=FAILURE_REMOTE, streak=40,
+        degraded_age=(DEGRADED_PAGE_HOURS + 1) * 3600)
+    resp, data = get(client, "?strict=1")
+    check(resp.status_code == 503,
+          "an outage past the page window is bad again")
+    check(data["counts"]["bad"] == 1 and data["degraded_count"] == 0,
+          "and it is counted as bad, not degraded")
+
+    print("strict=1: a wrong answer is bad immediately")
+    put(first, "error", note="HTTP 404", failure=FAILURE_CONTRACT, streak=0)
+    resp, data = get(client, "?strict=1")
+    check(resp.status_code == 503,
+          "a contract failure pages on the first run")
+    check(data["counts"]["bad"] == 1, "it is bad straight away")
+    check(data["sources"][0]["fail_streak"] == 0,
+          "and it does not start an outage streak")
 
     print("strict=1: stale canary, healthy-looking rows")
     drop_all()

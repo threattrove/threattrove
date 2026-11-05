@@ -16,6 +16,12 @@ Environment=PYTHONUNBUFFERED=1
 ExecStart=/opt/threattrove/.venv/bin/python /opt/threattrove/scripts/source_canary.py
 Nice=10
 IOSchedulingClass=idle
+# 2.11.0: the canary exits 3 when nothing is failing but a provider has been
+# unreachable for two runs. That is the provider's outage, not a defect here, so
+# it must not leave a failed unit behind -- the state is on /status, and
+# ?strict=degraded is there for a monitor that wants it. A real failure is
+# still exit 1 and still fails the unit.
+SuccessExitStatus=3
 # a source that hangs must not hold the next run back
 TimeoutStartSec=900
 StandardOutput=journal

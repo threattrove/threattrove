@@ -22,7 +22,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
 
-VERSION = "2.10.4"
+VERSION = "2.11.0"
 
 DEFAULT_TIMEOUT = float(os.environ.get("TT_TIMEOUT", "20"))
 CACHE_TTL_SECONDS = int(os.environ.get("TT_CACHE_TTL", str(7 * 24 * 3600)))
@@ -594,10 +594,51 @@ class SourceResult:
     note: str = ""
     link: str = ""
     category: str = "reputation"     # reputation | intel
+    #: Whose fault it was when this result is an error: ``remote`` when the
+    #: provider never gave us an answer it could send (connection refused, TLS
+    #: failure, 5xx, 408, 429), ``contract`` when it did answer and the answer
+    #: was wrong for us (4xx, unexpected body, unparseable JSON). Empty on
+    #: anything that is not a failure. The health canary reads it; nothing in a
+    #: verdict does.
+    failure: str = ""
     detail: Dict[str, Any] = dataclasses.field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return dataclasses.asdict(self)
+
+
+#: Failure labels. The distinction exists because the two need different
+#: people: ``remote`` is the provider's outage and passes on its own, while
+#: ``contract`` is a change in what came back and is ours to fix.
+FAILURE_REMOTE = "remote"
+FAILURE_CONTRACT = "contract"
+
+
+def failure_of(exc: BaseException) -> str:
+    """Classify a transport exception that stopped a request.
+
+    Everything ``requests`` raises before a response exists is the provider's
+    side of the wire: a refused connection, a timeout, a TLS or proxy failure.
+    Anything else is a defect in our own code and must not be excused as an
+    outage.
+    """
+    if isinstance(exc, (requests.ConnectionError, requests.Timeout,
+                        requests.exceptions.SSLError,
+                        requests.exceptions.ProxyError)):
+        return FAILURE_REMOTE
+    return FAILURE_CONTRACT
+
+
+def failure_of_status(code: int) -> str:
+    """Classify an HTTP status that was not the answer we asked for.
+
+    5xx is the provider failing to serve, and 408/429 mean it declined to serve
+    right now; both pass on their own. Any other non-200 is a request or
+    contract problem: a key that is not allowed, a path that moved, a body that
+    is no longer JSON.
+    """
+    return FAILURE_REMOTE if code >= 500 or code in (408, 429) \
+        else FAILURE_CONTRACT
 
 
 @dataclasses.dataclass
@@ -1195,6 +1236,12 @@ HEALTH_BAD = "bad"
 #: about our budget and pacing, not about the source, so it is counted apart
 #: from the answers and never decides the overall status.
 HEALTH_SKIP = "skip"
+#: The source is not answering, and the canary's own evidence says the provider
+#: is at fault: the connection was refused, timed out, or the provider returned
+#: 5xx. Kept apart from ``bad`` because the two need different people -- a
+#: broken source here versus crt.sh having a bad day -- and because a pager
+#: that fires for every third-party outage stops being read.
+HEALTH_DEGRADED = "degraded"
 
 #: Statuses in which a source answered the question it was asked. Anything
 #: outside this set is either a failure (bad) or a check that never really ran
@@ -1207,9 +1254,21 @@ FAILED_STATUSES = frozenset({"error", "timeout", "unauthorized", "empty",
 #: Latency multiple over the source's baseline that is worth a warning.
 HEALTH_DRIFT_LIMIT = 4.0
 
+#: Consecutive failed canary runs before a remote failure counts as degraded.
+#: One dead connection is noise; two runs four hours apart is a provider that is
+#: not coming back on its own.
+DEGRADED_STREAK = 2
+
+#: How long a provider may stay unreachable before the state returns to ``bad``.
+#: An outage is not our bug, but one that has outlasted a day is no longer
+#: transient and the page must stop excusing it.
+DEGRADED_PAGE_HOURS = float(os.environ.get("TT_DEGRADED_PAGE_HOURS", "24"))
+
 
 def health_state(status: str, drift: Optional[float] = None,
-                 expected: str = "") -> str:
+                 expected: str = "", *, failure: str = "",
+                 fail_streak: int = 0, degraded_since: Optional[float] = None,
+                 now: Optional[float] = None) -> str:
     """Classify one canary answer as ok, warn or bad.
 
     ``drift`` is the check's latency as a multiple of that source's baseline and
@@ -1219,10 +1278,30 @@ def health_state(status: str, drift: Optional[float] = None,
     breakages fixed in 2.6.0 and 2.7.0 returned HTTP 200 and a document that
     parsed to "not found": no error, no exception, just a different answer. A
     canary that only looks for failures would have called both of them healthy.
+
+    ``failure`` says whose fault a failed check was: ``remote`` for a provider
+    that never served an answer, ``contract`` for one that served the wrong one.
+    Only a remote failure can become ``degraded``, and only after
+    ``DEGRADED_STREAK`` runs, because a third-party outage is not a defect in
+    this code and a page that cries wolf through every one of them is worse
+    than no page at all. ``degraded_since`` is when that streak started, so an
+    outage that outlasts ``DEGRADED_PAGE_HOURS`` is reported as ``bad`` again:
+    past that point it is no longer a passing incident.
     """
     got = (status or "").strip().lower()
     if not got or got in FAILED_STATUSES:
-        return HEALTH_BAD
+        # The answer never arrived. If it never left the provider either, the
+        # fault is upstream: a warning at first, degraded once the streak says
+        # it is not a blip, and bad again if it outlasts the page window.
+        if (failure or "").strip().lower() != FAILURE_REMOTE:
+            return HEALTH_BAD
+        if int(fail_streak or 0) < DEGRADED_STREAK:
+            return HEALTH_WARN
+        started = degraded_since or 0.0
+        if started and ((time.time() if now is None else now) - started
+                        > DEGRADED_PAGE_HOURS * 3600):
+            return HEALTH_BAD
+        return HEALTH_DEGRADED
     if got in SKIPPED_STATUSES:
         # not asked: the allowance was spent, or the provider was being paced,
         # so this says nothing either way about the source
@@ -1292,7 +1371,15 @@ CREATE TABLE IF NOT EXISTS source_health (
     expected    TEXT NOT NULL DEFAULT '',
     baseline_ms REAL,
     baseline_at REAL,
-    drift       REAL
+    drift       REAL,
+    -- 2.10.4 and earlier had one word for every failure: ``bad``. It could not
+    -- tell a provider that never answered from a parser that read the answer
+    -- wrong, so a crt.sh outage looked exactly like a bug here. These three
+    -- keep the difference: whose fault it was, how many runs in a row, and
+    -- when that run of failures started.
+    failure        TEXT NOT NULL DEFAULT '',
+    fail_streak    INTEGER NOT NULL DEFAULT 0,
+    degraded_since REAL
 );
 """
 
@@ -1330,6 +1417,19 @@ class Store:
             self.conn.execute(
                 "ALTER TABLE cache ADD COLUMN logic_version INTEGER NOT NULL"
                 " DEFAULT 0")
+
+        # 2.11.0: a health row now also carries whose fault a failure was. The
+        # columns are added in place rather than by rewriting the table, so an
+        # existing row keeps its baseline and expectation and simply starts
+        # with an empty failure and a zero streak.
+        health = {row[1] for row in
+                  self.conn.execute("PRAGMA table_info(source_health)")}
+        for name, decl in (("failure", "TEXT NOT NULL DEFAULT ''"),
+                           ("fail_streak", "INTEGER NOT NULL DEFAULT 0"),
+                           ("degraded_since", "REAL")):
+            if name not in health:
+                self.conn.execute(
+                    f"ALTER TABLE source_health ADD COLUMN {name} {decl}")
 
     # -- cache -----------------------------------------------------------
     def get_cached(self, kind: str, value: str, source: str,
@@ -1685,7 +1785,8 @@ class Store:
     # -- source health ---------------------------------------------------
     def record_health(self, source: str, status: str, *,
                       kind: str = "", indicator: str = "", verdict: str = "",
-                      note: str = "", latency_ms: int = 0) -> Dict[str, Any]:
+                      note: str = "", latency_ms: int = 0,
+                      failure: str = "") -> Dict[str, Any]:
         """Store the outcome of one canary check and return the row.
 
         The first healthy answer for a source becomes the status it is expected
@@ -1696,21 +1797,47 @@ class Store:
         The baseline is an exponential average: a provider that has genuinely
         become slower moves the baseline within a few runs instead of alarming
         forever, while a sudden spike still stands out.
+
+        ``failure`` says whose fault a failed check was. A ``remote`` failure
+        increments ``fail_streak`` and starts ``degraded_since`` on the first
+        one, which is what turns the row into ``degraded`` on the second run and
+        back into ``bad`` once the outage has outlasted
+        ``DEGRADED_PAGE_HOURS``. Any answer that is not a failure clears both.
         """
         now = time.time()
         source = (source or "").strip()
         status = (status or "").strip().lower()
         latency_ms = max(0, int(latency_ms or 0))
+        failure = (failure or "").strip().lower()
+        if failure not in (FAILURE_REMOTE, FAILURE_CONTRACT):
+            failure = ""
         with self._lock:
             prev = self.conn.execute(
-                "SELECT expected, baseline_ms, baseline_at FROM source_health"
-                " WHERE source=?", (source,)).fetchone()
+                "SELECT expected, baseline_ms, baseline_at, fail_streak,"
+                " degraded_since FROM source_health WHERE source=?",
+                (source,)).fetchone()
             expected = (prev[0] or "") if prev else ""
             baseline = prev[1] if prev and prev[1] else None
             baseline_at = prev[2] if prev else None
+            fail_streak = int(prev[3] or 0) if prev else 0
+            degraded_since = prev[4] if prev else None
             drift = (round(latency_ms / baseline, 2)
                      if baseline and latency_ms else None)
-            state = health_state(status, drift, expected)
+            if status in SKIPPED_STATUSES:
+                # Not asked: this says nothing about the source either way, so
+                # an outage streak in progress neither grows nor resets.
+                state = HEALTH_SKIP
+            else:
+                if failure == FAILURE_REMOTE and (not status or
+                                                 status in FAILED_STATUSES):
+                    fail_streak += 1
+                    degraded_since = degraded_since or now
+                else:
+                    fail_streak = 0
+                    degraded_since = None
+                state = health_state(status, drift, expected, failure=failure,
+                                     fail_streak=fail_streak,
+                                     degraded_since=degraded_since, now=now)
             if state == HEALTH_OK:
                 if not expected:
                     expected = status
@@ -1722,22 +1849,29 @@ class Store:
             self.conn.execute(
                 "INSERT INTO source_health (source, kind, indicator, status,"
                 " verdict, note, latency_ms, checked_at, expected, baseline_ms,"
-                " baseline_at, drift) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
+                " baseline_at, drift, failure, fail_streak, degraded_since)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
                 " ON CONFLICT(source) DO UPDATE SET"
                 " kind=excluded.kind, indicator=excluded.indicator,"
                 " status=excluded.status, verdict=excluded.verdict,"
                 " note=excluded.note, latency_ms=excluded.latency_ms,"
                 " checked_at=excluded.checked_at, expected=excluded.expected,"
                 " baseline_ms=excluded.baseline_ms,"
-                " baseline_at=excluded.baseline_at, drift=excluded.drift",
+                " baseline_at=excluded.baseline_at, drift=excluded.drift,"
+                " failure=excluded.failure,"
+                " fail_streak=excluded.fail_streak,"
+                " degraded_since=excluded.degraded_since",
                 (source, kind, indicator, status, verdict, note, latency_ms,
-                 now, expected, baseline, baseline_at, drift))
+                 now, expected, baseline, baseline_at, drift, failure,
+                 fail_streak, degraded_since))
             self.conn.commit()
         return {"source": source, "state": state, "status": status,
                 "kind": kind, "indicator": indicator, "verdict": verdict,
                 "note": note, "latency_ms": latency_ms, "drift": drift,
                 "expected": expected, "baseline_ms": baseline,
-                "baseline_at": baseline_at, "checked_at": now}
+                "baseline_at": baseline_at, "checked_at": now,
+                "failure": failure, "fail_streak": fail_streak,
+                "degraded_since": degraded_since}
 
     def health_rows(self) -> List[Dict[str, Any]]:
         """Every stored health observation, worst state first."""
@@ -1745,18 +1879,25 @@ class Store:
             rows = self.conn.execute(
                 "SELECT source, kind, indicator, status, verdict, note,"
                 " latency_ms, checked_at, expected, baseline_ms, baseline_at,"
-                " drift FROM source_health").fetchall()
+                " drift, failure, fail_streak, degraded_since"
+                " FROM source_health").fetchall()
         out = []
         for r in rows:
             expected = r[8] or ""
+            failure = r[12] or ""
+            streak = int(r[13] or 0)
             out.append({
                 "source": r[0], "kind": r[1], "indicator": r[2],
                 "status": r[3], "verdict": r[4], "note": r[5],
                 "latency_ms": r[6], "checked_at": r[7], "expected": expected,
                 "baseline_ms": r[9], "baseline_at": r[10], "drift": r[11],
-                "state": health_state(r[3], r[11], expected),
+                "failure": failure, "fail_streak": streak,
+                "degraded_since": r[14],
+                "state": health_state(r[3], r[11], expected, failure=failure,
+                                      fail_streak=streak,
+                                      degraded_since=r[14]),
             })
-        order = {HEALTH_BAD: 0, HEALTH_WARN: 1, HEALTH_OK: 2}
+        order = {HEALTH_BAD: 0, HEALTH_DEGRADED: 1, HEALTH_WARN: 2, HEALTH_OK: 3}
         out.sort(key=lambda h: (order.get(h["state"], 3), h["source"]))
         return out
 
@@ -1856,8 +1997,19 @@ class Source:
         return SourceResult(**kw)
 
     def fail(self, exc: Exception) -> SourceResult:
+        """A failed request, labelled with whose fault it was."""
         msg = str(exc)[:180] or exc.__class__.__name__
-        return self.result(status="error", note=msg)
+        return self.result(status="error", note=msg, failure=failure_of(exc))
+
+    def http_fail(self, r: requests.Response) -> SourceResult:
+        """A non-200 answer, labelled with whose fault it was.
+
+        5xx and 408/429 are the provider declining to serve; any other status
+        is our request being wrong for it. The distinction is what lets the
+        canary say "degraded" about the first and ``bad`` about the second.
+        """
+        return self.result(status="error", note=f"HTTP {r.status_code}",
+                           failure=failure_of_status(r.status_code))
 
 
 _thread_local = threading.local()

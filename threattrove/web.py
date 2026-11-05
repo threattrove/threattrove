@@ -42,6 +42,7 @@ from .bulk import (
     to_csv,
 )
 from .core import (
+    DEGRADED_PAGE_HOURS,
     VERDICT_LABEL,
     VERDICT_UNKNOWN,
     VERSION,
@@ -309,8 +310,8 @@ def _status_payload(runtime: Runtime) -> Dict[str, Any]:
     rows = _source_rows(runtime)
     health = runtime.store.health_for()
     now = time.time()
-    counts = {"ok": 0, "warn": 0, "bad": 0, "skip": 0, "unchecked": 0,
-              "off": 0}
+    counts = {"ok": 0, "warn": 0, "degraded": 0, "bad": 0, "skip": 0,
+              "unchecked": 0, "off": 0}
     newest = 0.0
     stale_count = 0
     out: List[Dict[str, Any]] = []
@@ -329,7 +330,10 @@ def _status_payload(runtime: Runtime) -> Dict[str, Any]:
             stale = True
         else:
             state = health_state(h.get("status", ""), h.get("drift"),
-                                 h.get("expected", ""))
+                                 h.get("expected", ""),
+                                 failure=h.get("failure", ""),
+                                 fail_streak=h.get("fail_streak", 0),
+                                 degraded_since=h.get("degraded_since"))
             note = h.get("note", "")
             newest = max(newest, checked_at)
             age = now - checked_at
@@ -349,13 +353,26 @@ def _status_payload(runtime: Runtime) -> Dict[str, Any]:
             "indicator": h.get("indicator", ""),
             "latency_ms": h.get("latency_ms"),
             "baseline_ms": h.get("baseline_ms"), "drift": h.get("drift"),
+            # 2.11.0: whose fault the last failure was, and whether it has
+            # lasted long enough to be called an outage rather than a blip.
+            "failure": h.get("failure", ""),
+            "fail_streak": h.get("fail_streak", 0),
+            "degraded": state == "degraded",
+            "degraded_since": h.get("degraded_since"),
             "checked_at": checked_at or None,
         })
-    rank = {"bad": 0, "warn": 1, "skip": 2, "unchecked": 3, "ok": 4, "off": 5}
-    out.sort(key=lambda r: (rank[r["state"]], str(r["display"]).lower()))
-    checked = counts["ok"] + counts["warn"] + counts["bad"]
+    # Worst first. ``degraded`` sits between bad and warn: worse than a slow
+    # source, better than a broken one.
+    order = ("bad", "degraded", "warn", "skip", "unchecked", "ok", "off")
+    rank = {name: i for i, name in enumerate(order)}
+    out.sort(key=lambda r: (rank.get(r["state"], len(rank)),
+                            str(r["display"]).lower()))
+    checked = (counts["ok"] + counts["warn"] + counts["bad"]
+               + counts["degraded"])
     if counts["bad"]:
         overall = "bad"
+    elif counts["degraded"]:
+        overall = "degraded"
     elif counts["warn"]:
         overall = "warn"
     elif counts["ok"]:
@@ -373,6 +390,11 @@ def _status_payload(runtime: Runtime) -> Dict[str, Any]:
         "stale_after_hours": HEALTH_STALE_SECONDS // 3600,
         "counts": counts,
         "stale_count": stale_count,
+        # A third-party outage, counted apart from ``bad`` so a monitor can
+        # choose not to page for it. ``degraded_after_hours`` is how long such
+        # an outage is excused before it is reported as ``bad`` again.
+        "degraded_count": counts["degraded"],
+        "degraded_after_hours": DEGRADED_PAGE_HOURS,
         "checked": checked,
         "sources": out,
     }
@@ -917,23 +939,37 @@ def create_app(store: Optional[Store] = None) -> Flask:
 
         ``?strict=1`` (also ``true``/``yes``) answers 503 only when a source is
         broken (``bad``) or its canary data has gone stale -- the two states
-        that mean lookups are wrong or unproven. ``?strict=warn`` (also
-        ``all``) is the loud setting: it also fails on latency drift and on a
-        source that answers differently than it used to. With no ``strict``
-        argument the payload is informational and never fails.
+        that mean lookups are wrong or unproven. A ``degraded`` source does not
+        fail it: that state means a third-party provider is down, which is not
+        something a page here can fix, and a pager that wakes for it every time
+        crt.sh has a bad day stops being read.
+
+        ``?strict=degraded`` adds ``degraded`` to that set, for a monitor that
+        does want to know a provider has been unreachable for two canary runs.
+        ``?strict=warn`` (also ``all``) is the loud setting: it also fails on
+        latency drift, on a source that answers differently than it used to,
+        and on an outage. With no ``strict`` argument the payload is
+        informational and never fails.
         """
         api_limited = api_guard()
         if api_limited:
             return api_limited
         rt: Runtime = app.extensions["threattrove"]
         data = _status_payload(rt)
-        resp = jsonify(data)
         mode = (request.args.get("strict") or "").strip().lower()
+        degraded = data["degraded_count"] > 0
         failing = bool(data["counts"].get("bad")) or data["stale_count"] > 0
         if mode in ("warn", "all"):
-            failing = failing or bool(data["counts"].get("warn"))
+            failing = (failing or bool(data["counts"].get("warn"))
+                       or degraded)
+        elif mode == "degraded":
+            failing = failing or degraded
         elif mode not in ("1", "true", "yes"):
             failing = False
+        resp = jsonify(data)
+        # The payload does not change with the mode; say which mode was asked
+        # so a 503 in a log can be read without guessing.
+        resp.headers["X-ThreatTrove-Strict"] = mode or "none"
         if failing:
             resp.status_code = 503
         resp.headers["Cache-Control"] = "no-store"

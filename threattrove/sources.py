@@ -22,6 +22,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from .core import (
+    FAILURE_CONTRACT,
+    FAILURE_REMOTE,
     KIND_DOMAIN,
     KIND_HASH,
     KIND_IP,
@@ -35,6 +37,7 @@ from .core import (
     Source,
     SourceResult,
     DEFAULT_TIMEOUT,
+    failure_of_status,
     pace_defer,
     registrable_domain,
 )
@@ -132,7 +135,7 @@ class CIRCLHashlookup(Source):
             if r.status_code in (400, 404):
                 continue
             if r.status_code != 200:
-                return self.result(status="error", note=f"HTTP {r.status_code}")
+                return self.http_fail(r)
             data = r.json()
             known_mal = str(data.get("KnownMalicious", "")).strip()
             link = url
@@ -174,7 +177,7 @@ class AlienVaultOTXFile(Source):
         if r.status_code == 404:
             return self.result(status="not_found")
         if r.status_code != 200:
-            return self.result(status="error", note=f"HTTP {r.status_code}")
+            return self.http_fail(r)
         data = r.json()
         pulses, raw_pulses, ignored, _ = _otx_pulse_count(data)
         analysis = data.get("analysis") or {}
@@ -209,7 +212,7 @@ class MalwareBazaar(Source):
         if r.status_code in (401, 403):
             return self.result(status="unauthorized", note="invalid Auth-Key")
         if r.status_code != 200:
-            return self.result(status="error", note=f"HTTP {r.status_code}")
+            return self.http_fail(r)
         data = r.json()
         status = data.get("query_status")
         if status == "hash_not_found":
@@ -247,7 +250,7 @@ class ThreatFox(Source):
         if r.status_code in (401, 403):
             return self.result(status="unauthorized", note="invalid Auth-Key")
         if r.status_code != 200:
-            return self.result(status="error", note=f"HTTP {r.status_code}")
+            return self.http_fail(r)
         data = r.json()
         status = data.get("query_status")
         if status in ("no_result", "illegal_search_term"):
@@ -292,7 +295,7 @@ class URLhausPayload(Source):
         if r.status_code in (401, 403):
             return self.result(status="unauthorized", note="invalid Auth-Key")
         if r.status_code != 200:
-            return self.result(status="error", note=f"HTTP {r.status_code}")
+            return self.http_fail(r)
         data = r.json()
         if data.get("query_status") != "ok":
             return self.result(status="not_found")
@@ -452,7 +455,7 @@ class HybridAnalysis(Source):
         if r.status_code == 429:
             return self.result(status="error", note="rate limited (200/min)")
         if r.status_code != 200:
-            return self.result(status="error", note=f"HTTP {r.status_code}")
+            return self.http_fail(r)
         try:
             data = r.json()
         except ValueError:
@@ -471,7 +474,7 @@ class HybridAnalysis(Source):
         r = self.session().get(f"{self.API}/search/hash", params={"hash": h},
                                headers=self._headers(), timeout=DEFAULT_TIMEOUT)
         if r.status_code != 200:
-            return self.result(status="error", note=f"HTTP {r.status_code}")
+            return self.http_fail(r)
         try:
             data = r.json()
         except ValueError:
@@ -603,7 +606,7 @@ class MalShare(Source):
             return self.result(status="error",
                                note="quota exceeded (2000 calls/day)")
         if r.status_code != 200:
-            return self.result(status="error", note=f"HTTP {r.status_code}")
+            return self.http_fail(r)
         try:
             data = r.json()
         except ValueError:
@@ -650,7 +653,7 @@ class Triage(Source):
         if r.status_code in (401, 403):
             return self.result(status="unauthorized", note="invalid API key")
         if r.status_code != 200:
-            return self.result(status="error", note=f"HTTP {r.status_code}")
+            return self.http_fail(r)
         data = r.json()
         entries = data.get("data") or []
         if not entries:
@@ -701,7 +704,7 @@ class AlienVaultOTXUrl(Source):
         if r.status_code == 404:
             return self.result(status="not_found")
         if r.status_code != 200:
-            return self.result(status="error", note=f"HTTP {r.status_code}")
+            return self.http_fail(r)
         data = r.json()
         pulses, raw_pulses, ignored, _ = _otx_pulse_count(data)
         validation = [v.get("name") for v in (data.get("validation") or [])
@@ -741,7 +744,7 @@ class URLScanUrl(Source):
         if r.status_code == 429:
             return self.result(status="error", note="rate limited")
         if r.status_code != 200:
-            return self.result(status="error", note=f"HTTP {r.status_code}")
+            return self.http_fail(r)
         data = r.json()
         results = data.get("results") or []
         total = int(data.get("total") or 0)
@@ -803,7 +806,7 @@ class URLhausUrl(Source):
         if r.status_code in (401, 403):
             return self.result(status="unauthorized", note="invalid Auth-Key")
         if r.status_code != 200:
-            return self.result(status="error", note=f"HTTP {r.status_code}")
+            return self.http_fail(r)
         data = r.json()
         if data.get("query_status") != "ok":
             return self.result(status="no_match")
@@ -949,7 +952,7 @@ class PhishTank(Source):
                                    note="upstream blocks API clients (Cloudflare)")
             return self.result(status="unauthorized", note="invalid app key")
         if r.status_code != 200:
-            return self.result(status="error", note=f"HTTP {r.status_code}")
+            return self.http_fail(r)
         try:
             data = r.json().get("results") or {}
         except (ValueError, AttributeError):
@@ -1002,7 +1005,7 @@ class AlienVaultOTXDomain(Source):
         if r.status_code == 404:
             return self.result(status="not_found")
         if r.status_code != 200:
-            return self.result(status="error", note=f"HTTP {r.status_code}")
+            return self.http_fail(r)
         data = r.json()
         pulses, raw_pulses, ignored, _ = _otx_pulse_count(data)
         mal = (data.get("malware") or {}).get("count", 0) or 0
@@ -1121,7 +1124,7 @@ class _MetaDefenderQuota:
             return self.result(status="error",
                                note="rate limited (community key: 500/hour)")
         if r.status_code != 200:
-            return self.result(status="error", note=f"HTTP {r.status_code}")
+            return self.http_fail(r)
         return None
 
 
@@ -1389,7 +1392,7 @@ class RDAPWhois(Source):
         if r.status_code == 404:
             return self.result(status="not_found", note="no RDAP record")
         if r.status_code != 200:
-            return self.result(status="error", note=f"HTTP {r.status_code}")
+            return self.http_fail(r)
         try:
             data = r.json()
         except ValueError:
@@ -1482,9 +1485,16 @@ class CertificateTransparency(Source):
 
         No pause follows the last attempt: the lookup is over, and sleeping
         there only delayed the caller's answer.
+
+        The failure is labelled with whose fault it was, and the last attempt
+        decides: a refused connection, a timeout, a 5xx and a body that is not
+        the API's JSON all mean crt.sh failed to serve, while its 4xx and a
+        well-formed list of the wrong shape mean we asked wrongly.
         """
         note = "no answer"
+        failure = ""
         made = 0                       # attempts actually opened, for the note
+        r = None
         started = time.monotonic()
         for attempt in range(self._ATTEMPTS):
             left = self._BUDGET - (time.monotonic() - started)
@@ -1499,23 +1509,32 @@ class CertificateTransparency(Source):
                     params={"q": ind.value, "output": "json"},
                     timeout=(self._TIMEOUT[0], read))
             except requests.RequestException as exc:
-                note = self.fail(exc).note or "request failed"
+                failed = self.fail(exc)
+                note, failure = failed.note or "request failed", failed.failure
                 r = None
             else:
                 if r.status_code == 200:
                     try:
                         data = r.json()
                     except ValueError:
+                        # A 200 carrying an HTML error page or a cut-off body:
+                        # crt.sh failed to serve its own API. That is the
+                        # provider's fault, not a field we read wrongly, so it
+                        # is retried and can only count as degraded.
                         note = "bad JSON (error page, not a certificate list)"
+                        failure = FAILURE_REMOTE
                     else:
                         if isinstance(data, list):
                             return data, None
+                        # Valid JSON of the wrong shape is a contract change:
+                        # something here needs a person.
                         note = "unexpected JSON shape"
+                        failure = FAILURE_CONTRACT
                 elif r.status_code < 500 and r.status_code != 429:
-                    return None, self.result(
-                        status="error", note=f"HTTP {r.status_code}")
+                    return None, self.http_fail(r)
                 else:
                     note = f"HTTP {r.status_code}"
+                    failure = failure_of_status(r.status_code)
             if attempt + 1 >= self._ATTEMPTS:
                 break
             pause = self._pause(attempt, r)
@@ -1523,7 +1542,8 @@ class CertificateTransparency(Source):
                 break
             time.sleep(pause)
         return None, self.result(
-            status="error", note=f"{note} after {made} attempts")
+            status="error", note=f"{note} after {made} attempts",
+            failure=failure)
 
     def _pause(self, attempt: int,
                r: Optional[requests.Response] = None) -> float:
@@ -1590,7 +1610,7 @@ class ReverseIP(Source):
         except requests.RequestException as exc:
             return self.fail(exc)
         if r.status_code != 200:
-            return self.result(status="error", note=f"HTTP {r.status_code}")
+            return self.http_fail(r)
         text = r.text.strip()
         if not text or "error" in text.lower() or "no DNS" in text.lower():
             return self.result(status="not_found")
@@ -1670,7 +1690,7 @@ def _vt_parse(source: Source, r: requests.Response, file_hash: str = "",
                    _retry_after(r, default=60.0))
         return source.result(status="error", note="rate limited (free tier: 4/min)")
     if r.status_code != 200:
-        return source.result(status="error", note=f"HTTP {r.status_code}")
+        return source.http_fail(r)
     try:
         data = r.json()
     except ValueError:

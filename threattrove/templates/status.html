@@ -13,6 +13,9 @@
 <div class="stats">
   <div class="stat"><b>{{ status.counts.ok }}</b><span>answering</span></div>
   <div class="stat"><b>{{ status.counts.warn }}</b><span>warning</span></div>
+  {% if status.counts.degraded %}
+  <div class="stat"><b>{{ status.counts.degraded }}</b><span>provider down</span></div>
+  {% endif %}
   <div class="stat"><b>{{ status.counts.bad }}</b><span>failing</span></div>
   <div class="stat"><b>{{ status.counts.skip }}</b><span>not asked</span></div>
   <div class="stat"><b>{{ status.counts.unchecked }}</b><span>unchecked</span></div>
@@ -36,6 +39,16 @@
 <div class="alert info">
   No check has been recorded yet, so nothing here is a claim about any source.
   Run <code>scripts/source_canary.py</code> once, or wait for the timer.
+</div>
+{% elif status.status == 'degraded' %}
+<div class="alert info">
+  {{ status.counts.degraded }} source{{ '' if status.counts.degraded == 1 else 's' }}
+  {{ 'has' if status.counts.degraded == 1 else 'have' }} not answered for two checks
+  in a row because the provider itself is down, not because anything here is
+  broken. Lookups still return every other answer, and the state returns to
+  <strong>failing</strong> on its own if the outage lasts more than
+  {{ status.degraded_after_hours|int }} hours. A monitor can ignore it, or watch
+  <code>?strict=degraded</code> to hear about it.
 </div>
 {% elif status.status == 'bad' %}
 <div class="alert error">
@@ -71,7 +84,9 @@
         </td>
         <td class="note">{{ s.kinds|join(', ') }}</td>
         <td>
-          <span class="tag {{ 'malicious' if s.state == 'bad' else 'suspicious' if s.state == 'warn' else 'clean' if s.state == 'ok' else 'unknown' }}">{{ s.state }}</span>
+          <span class="tag {{ 'malicious' if s.state == 'bad' else 'degraded' if s.state == 'degraded' else 'suspicious' if s.state == 'warn' else 'clean' if s.state == 'ok' else 'unknown' }}">{{ s.state }}</span>
+          {% if s.degraded %}<div class="note" style="font-size:11px">provider-side
+            {% if s.fail_streak %}{{ s.fail_streak }} checks{% endif %}</div>{% endif %}
         </td>
         <td class="note">
           {% if s.status %}{{ s.status }}{% if s.verdict and s.verdict != 'unknown' %} · {{ s.verdict }}{% endif %}
@@ -112,9 +127,12 @@ ip      8.8.8.8                                                           stable
     returns the same data. <code>?strict=1</code> answers 503 when a source is
     <strong>failing</strong> or when a canary result is <strong>stale</strong>
     (nothing recorded for {{ status.stale_after_hours }} hours, so the timer may
-    be dead); <code>?strict=warn</code> is the loud setting and also fails on a
-    source that is merely slow or that changed its answer. A stale row is
-    flagged in this payload so a monitor can tell "slow" from "unproven".
+    be dead); a <strong>degraded</strong> provider does not fail it, because
+    there is nothing here to fix. <code>?strict=degraded</code> adds it for a
+    monitor that does want to hear about a provider outage;
+    <code>?strict=warn</code> is the loud setting and also fails on a source
+    that is merely slow or that changed its answer. A stale row is flagged in
+    this payload so a monitor can tell "slow" from "unproven".
   </p>
 </div>
 {% endblock %}

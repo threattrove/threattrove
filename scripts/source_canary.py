@@ -23,7 +23,11 @@ support several indicator types are therefore checked on the type listed first
 below; the canary is a liveness and agreement check, not a per-endpoint test.
 
 Exit status is 1 when any active source is failing, so the timer leaves a
-failed unit behind for whoever watches ``systemctl --failed``.
+failed unit behind for whoever watches ``systemctl --failed``. It is 3 when
+nothing is failing but a provider has been unreachable for two runs in a row:
+that is an outage on their side, not a defect here, so it leaves a warning in
+the journal rather than a failed unit. The shipped unit lists 3 in
+``SuccessExitStatus`` for exactly that reason.
 """
 from __future__ import annotations
 
@@ -39,6 +43,7 @@ if ROOT not in sys.path:
 
 from threattrove.core import (  # noqa: E402
     HEALTH_BAD,
+    HEALTH_DEGRADED,
     Engine,
     Store,
     health_state,
@@ -87,6 +92,7 @@ def main() -> int:
     checks = []
     seen = set()
     bad = 0
+    degraded = 0
     for text, sample in CANARY:
         ind = parse_indicator(text)
         if ind is None:
@@ -118,51 +124,68 @@ def main() -> int:
                 "verdict": result.verdict,
                 "note": result.note,
                 "latency_ms": int(latency),
+                "failure": result.failure,
             }
             if args.dry_run:
-                row["state"] = health_state(result.status)
+                # Nothing is stored on a dry run, so there is no streak to
+                # weigh and only the verdict for this one check is shown.
+                row["state"] = health_state(result.status,
+                                            failure=result.failure)
                 row["expected"] = ""
                 row["drift"] = None
             else:
                 stored = store.record_health(
                     source.name, result.status, kind=ind.kind,
                     indicator=ind.value, verdict=result.verdict,
-                    note=result.note, latency_ms=int(latency))
+                    note=result.note, latency_ms=int(latency),
+                    failure=result.failure)
                 row["state"] = stored["state"]
+                row["fail_streak"] = stored["fail_streak"]
                 row["expected"] = stored["expected"]
                 row["drift"] = stored["drift"]
             if row["state"] == HEALTH_BAD:
                 bad += 1
+            elif row["state"] == HEALTH_DEGRADED:
+                degraded += 1
             checks.append(row)
             if not args.json:
                 drift = row.get("drift")
                 suffix = f" {drift:.1f}x" if drift and drift >= 1.5 else ""
                 note = f"  {result.note[:70]}" if result.note else ""
-                print(f"  {row['state']:<4} {source.name:<24}"
+                print(f"  {row['state']:<9} {source.name:<24}"
                       f"{result.status:<12}{row['latency_ms']:>6} ms{suffix}{note}")
 
     counts = {state: sum(1 for c in checks if c["state"] == state)
-              for state in ("ok", "warn", "bad", "skip")}
+              for state in ("ok", "warn", "degraded", "bad", "skip")}
     # A source that was not asked -- its allowance is spent, or a sibling
     # endpoint of the same provider was just called -- says nothing either way.
     # Counting it as "checked" claimed two more checks than the run made, so it
     # is reported apart from the sources that actually answered. The exit code
     # still depends only on the ones that failed.
-    answered = counts["ok"] + counts["warn"] + counts["bad"]
+    answered = (counts["ok"] + counts["warn"] + counts["bad"]
+                + counts["degraded"])
     summary = {"checked": answered, "probed": len(checks),
-               "skipped": counts["skip"], "failed": bad, "states": counts,
+               "skipped": counts["skip"], "failed": bad,
+               "degraded": degraded, "states": counts,
                "dry_run": bool(args.dry_run)}
     if args.json:
         print(json.dumps({"summary": summary, "checks": checks}, indent=2))
     else:
-        print(f"\n{counts['ok']} ok, {counts['warn']} warn, {counts['bad']} bad"
+        print(f"\n{counts['ok']} ok, {counts['warn']} warn, "
+              f"{counts['degraded']} degraded, {counts['bad']} bad"
               f", {counts['skip']} not asked of {len(checks)} source(s) probed")
         if bad:
             print("failing sources: "
                   + ", ".join(c["source"] for c in checks
                               if c["state"] == HEALTH_BAD))
+        if degraded:
+            print("provider-side outages (not a fault here): "
+                  + ", ".join(c["source"] for c in checks
+                              if c["state"] == HEALTH_DEGRADED))
     store.close()
-    return 1 if bad else 0
+    if bad:
+        return 1
+    return 3 if degraded else 0
 
 
 if __name__ == "__main__":

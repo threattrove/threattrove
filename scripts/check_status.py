@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
@@ -24,7 +25,11 @@ _TMP = tempfile.mkdtemp(prefix="tt-status-check-")
 os.environ["TT_DB"] = os.path.join(_TMP, "check.db")
 
 from threattrove.core import (  # noqa: E402
+    DEGRADED_PAGE_HOURS,
+    FAILURE_CONTRACT,
+    FAILURE_REMOTE,
     HEALTH_BAD,
+    HEALTH_DEGRADED,
     HEALTH_OK,
     HEALTH_SKIP,
     HEALTH_WARN,
@@ -138,6 +143,17 @@ def main() -> int:
           "5x the baseline latency is a warning")
     check(health_state("found", 2.0, "found") == HEALTH_OK,
           "2x the baseline latency is not")
+    check(health_state("error", failure=FAILURE_REMOTE) == HEALTH_WARN,
+          "a provider that never answered is a warning first, not bad")
+    check(health_state("error", failure=FAILURE_REMOTE, fail_streak=2,
+                       degraded_since=time.time()) == HEALTH_DEGRADED,
+          "two in a row make it degraded")
+    check(health_state("error", failure=FAILURE_CONTRACT) == HEALTH_BAD,
+          "an answer we could not use is still bad")
+    check(health_state("error", failure=FAILURE_REMOTE, fail_streak=9,
+                       degraded_since=time.time()
+                       - (DEGRADED_PAGE_HOURS + 1) * 3600) == HEALTH_BAD,
+          "an outage past the page window is bad again")
 
     print("health: recording")
     one = store.record_health("canary_a", "found", kind="hash",
@@ -172,6 +188,32 @@ def main() -> int:
     check(skipped["expected"] == "", "a skip never becomes the expectation")
     check(store.health_for()["canary_skip"]["state"] == HEALTH_SKIP,
           "and it stays a skip when read back")
+
+    print("health: degraded")
+    first = store.record_health("canary_crt", "error",
+                                note="HTTP 502 after 3 attempts",
+                                failure=FAILURE_REMOTE)
+    check(first["state"] == HEALTH_WARN, "the first outage is a warning")
+    check(first["fail_streak"] == 1, "and starts the streak")
+    check(first["degraded_since"] is not None, "and starts the clock")
+    second = store.record_health("canary_crt", "error",
+                                 note="HTTP 502 after 3 attempts",
+                                 failure=FAILURE_REMOTE)
+    check(second["state"] == HEALTH_DEGRADED, "the second run is degraded")
+    check(second["fail_streak"] == 2, "the streak is two")
+    check(second["degraded_since"] == first["degraded_since"],
+          "the clock is not restarted by the second run")
+    held = store.record_health("canary_crt", "skipped", note="allowance")
+    check(held["state"] == HEALTH_SKIP and held["fail_streak"] == 2,
+          "a skip neither grows nor clears the streak")
+    fixed = store.record_health("canary_crt", "found", latency_ms=800)
+    check(fixed["state"] == HEALTH_OK, "an answer ends the outage")
+    check(fixed["fail_streak"] == 0 and fixed["degraded_since"] is None,
+          "and clears both the streak and its clock")
+    ours = store.record_health("carnary_ours", "error", note="HTTP 404",
+                               failure=FAILURE_CONTRACT)
+    check(ours["state"] == HEALTH_BAD and ours["fail_streak"] == 0,
+          "our own bad request never counts as a provider outage")
 
     print("display: long values")
     digest = "d41d8cd98f00b204e9800998ecf8427e"
@@ -323,6 +365,55 @@ def main() -> int:
 
     resp = client.get("/api/v1/status?strict=1")
     check(resp.status_code == 503, "strict mode fails while a source is failing")
+
+    # Now make that source a provider outage rather than a breakage: two
+    # remote failures in a row, which is exactly what crt.sh produces during
+    # one of its 502 afternoons. The other active sources have never been
+    # checked in this throwaway database, and "no canary data" is a strict
+    # failure in its own right, so give them an answer first: the only thing
+    # left for strict mode to react to should be the outage.
+    for row in _source_rows(app.extensions["threattrove"]):
+        if row["active"] and row["name"] != live:
+            store.record_health(row["name"], "found", latency_ms=500)
+    for _ in range(2):
+        store.record_health(live, "error", note="HTTP 502 from upstream",
+                            failure=FAILURE_REMOTE)
+    resp = app.test_client().get("/api/v1/status")
+    data = resp.get_json()
+    check(data["counts"]["degraded"] == 1, "the row is counted as degraded")
+    check(data["degraded_count"] == 1,
+          "degraded_count is reported beside the other counts")
+    check(data["status"] == "degraded", "the page says provider-side")
+    row = next(s for s in data["sources"] if s["name"] == live)
+    check(data["sources"][0]["name"] == live,
+          "a degraded row still sorts above a warning")
+    check(row["failure"] == FAILURE_REMOTE,
+          "the row says whose fault it was")
+    check(row["degraded"] is True and row["fail_streak"] >= 2,
+          "and carries the streak")
+    check(set(data["counts"]) == {"ok", "warn", "degraded", "bad",
+                                   "skip", "unchecked", "off"},
+          "the counts keep one key per state, no more")
+    check(data["counts"]["bad"] == 0 and data["counts"]["ok"] >= 1,
+          "and the old keys are still counted")
+
+    resp = client.get("/status")
+    body = resp.get_data(as_text=True)
+    check("degraded" in body, "the page shows the tag")
+    check("provider itself is down" in body, "and explains it is not our bug")
+    check("class=\"tag degraded\"" in body, "with its own style")
+
+    check(client.get("/api/v1/status?strict=1").status_code == 200,
+          "strict=1 stays green for a third-party outage")
+    degraded_strict = client.get("/api/v1/status?strict=degraded")
+    check(degraded_strict.status_code == 503,
+          "strict=degraded fails on it")
+    check(degraded_strict.headers.get("X-ThreatTrove-Strict") == "degraded",
+          "and the header says which mode answered")
+    check(client.get("/api/v1/status?strict=warn").status_code == 503,
+          "the loud mode fails on it too")
+    check(client.get("/api/v1/status?strict=1x").status_code == 200,
+          "an unknown strict value never fails")
 
     resp = client.get("/health")
     check(resp.status_code == 200 and resp.get_json()["status"] == "ok",
