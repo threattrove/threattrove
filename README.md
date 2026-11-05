@@ -707,6 +707,7 @@ Dockerfile, docker-compose.yml
 .venv/bin/python scripts/check_cards.py       # evidence cards and page rendering (offline)
 .venv/bin/python scripts/check_privacy.py     # no queried value leaks to the page or logs (offline)
 .venv/bin/python scripts/check_status.py      # /local and /recent paging, long-hash shortening, source-health states, /status and /api/v1/status (offline)
+.venv/bin/python scripts/check_crt_retry.py   # crt.sh retry shape: 502 recovery, backoff, Retry-After, bounded total (offline)
 .venv/bin/python scripts/check_feodo.py       # Feodo parsing, in-place re-import, local-corpus verdict (offline)
 .venv/bin/python scripts/check_docs.py        # /about, /privacy, /sitemap.xml, /robots.txt (offline)
 .venv/bin/python scripts/check_fresh.py       # fresh=1 rationing, crawler policy, robots (offline)

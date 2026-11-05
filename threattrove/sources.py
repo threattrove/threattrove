@@ -1448,14 +1448,26 @@ class CertificateTransparency(Source):
     min_interval = 1.5
 
     #: crt.sh builds its answer on demand, and a request for a busy domain can
-    #: wait in that queue for half a minute. This used to be one attempt with a
-    #: 25 s read timeout, so a single slow answer ended the lookup with nothing:
-    #: the canary caught exactly that on its first run. A second connection is
-    #: usually served in a second or two, which buys more than a longer wait on
-    #: the first one would.
-    _TIMEOUT = (10, 15)
-    _RETRY_TIMEOUT = (10, 25)
-    _ATTEMPTS = 2
+    #: wait in that queue for half a minute, while an overloaded front end
+    #: answers 502 in well under a second. Those two failures want opposite
+    #: treatment: a slow answer wants patience on one connection, a fast error
+    #: wants another connection soon. This used to be two attempts with a 25 s
+    #: read timeout on the second, so a 502 that cleared in seconds still ended
+    #: the lookup with nothing -- the canary caught exactly that.
+    #:
+    #: Three attempts now, each with a shorter read window, and the whole call
+    #: capped by ``_BUDGET`` so it stays inside one page load: the old shape
+    #: could spend 43 s before reporting the same failure. A 502 costs about a
+    #: second, so the second and third attempts arrive at 2 s and 8 s; a slow
+    #: answer spreads its patience over three windows instead of one.
+    _TIMEOUT = (5, 15)
+    _ATTEMPTS = 3
+    _BUDGET = 36.0
+    _BACKOFF = (2.0, 6.0)
+    #: Longest pause a ``Retry-After`` can add on top of the backoff.
+    _MAX_PAUSE = 15.0
+    #: Shortest slice worth opening a connection for.
+    _MIN_SLICE = 1.5
 
     def _fetch(
             self, ind: Indicator
@@ -1465,17 +1477,30 @@ class CertificateTransparency(Source):
         Retried on a timeout, on a 5xx and on a body that is not JSON: an
         overloaded crt.sh replies with an HTML error page, which is the same
         "HTTP 200 that does not mean what it says" this project keeps finding
-        in other providers.
+        in other providers. A 4xx is our request's fault and is reported at
+        once, without the retry.
+
+        No pause follows the last attempt: the lookup is over, and sleeping
+        there only delayed the caller's answer.
         """
         note = "no answer"
+        made = 0                       # attempts actually opened, for the note
+        started = time.monotonic()
         for attempt in range(self._ATTEMPTS):
-            wait = self._TIMEOUT if attempt == 0 else self._RETRY_TIMEOUT
+            left = self._BUDGET - (time.monotonic() - started)
+            if attempt and left < self._MIN_SLICE:
+                break
+            made = attempt + 1
+            # Never open a connection with less time left than it can use.
+            read = max(min(self._TIMEOUT[1], left), self._MIN_SLICE)
             try:
                 r = self.session().get(
                     "https://crt.sh/",
-                    params={"q": ind.value, "output": "json"}, timeout=wait)
+                    params={"q": ind.value, "output": "json"},
+                    timeout=(self._TIMEOUT[0], read))
             except requests.RequestException as exc:
                 note = self.fail(exc).note or "request failed"
+                r = None
             else:
                 if r.status_code == 200:
                     try:
@@ -1486,14 +1511,34 @@ class CertificateTransparency(Source):
                         if isinstance(data, list):
                             return data, None
                         note = "unexpected JSON shape"
-                elif r.status_code < 500:
+                elif r.status_code < 500 and r.status_code != 429:
                     return None, self.result(
                         status="error", note=f"HTTP {r.status_code}")
                 else:
                     note = f"HTTP {r.status_code}"
-            time.sleep(1.0 * (attempt + 1))
+            if attempt + 1 >= self._ATTEMPTS:
+                break
+            pause = self._pause(attempt, r)
+            if time.monotonic() - started + pause >= self._BUDGET - self._MIN_SLICE:
+                break
+            time.sleep(pause)
         return None, self.result(
-            status="error", note=f"{note} after {self._ATTEMPTS} attempts")
+            status="error", note=f"{note} after {made} attempts")
+
+    def _pause(self, attempt: int,
+               r: Optional[requests.Response] = None) -> float:
+        """Seconds to wait before the next attempt.
+
+        The backoff is what makes a third attempt worth making at all; a
+        ``Retry-After`` from crt.sh, when it sends one, outranks the fixed
+        schedule but is capped so a "come back in an hour" does not stall a
+        page load.
+        """
+        base = self._BACKOFF[min(attempt, len(self._BACKOFF) - 1)]
+        asked = 0.0
+        if r is not None and r.status_code in (429, 503):
+            asked = _retry_after(r, default=0.0)
+        return min(max(base, asked), self._MAX_PAUSE)
 
     def lookup(self, ind: Indicator) -> SourceResult:
         data, failure = self._fetch(ind)
