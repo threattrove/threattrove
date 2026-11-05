@@ -146,6 +146,12 @@ lands around 140 MB of SQLite — plan disk accordingly.
 | `/sitemap.xml`, `/robots.txt` | Crawler index and policy, absolute URLs from `TT_SITE_URL` |
 | `/health`, `/healthz` | Liveness JSON: `{"status":"ok","version":"…"}` |
 
+Below 720px, `/recent` and `/local` print a hex digest as its first seven and
+last eight characters separated by an ellipsis. A 64-character SHA-256 otherwise wraps over
+six or eight lines in a phone-width column and hides every other row; both ends
+are what an analyst compares against a report. The full value stays in the link
+target and its `title`, and domains, IPs and URLs are never shortened.
+
 ---
 
 ## JSON API
@@ -700,7 +706,7 @@ Dockerfile, docker-compose.yml
 .venv/bin/python scripts/check_refang.py      # defanged indicators (offline)
 .venv/bin/python scripts/check_cards.py       # evidence cards and page rendering (offline)
 .venv/bin/python scripts/check_privacy.py     # no queried value leaks to the page or logs (offline)
-.venv/bin/python scripts/check_status.py      # /local and /recent paging, source-health states, /status and /api/v1/status (offline)
+.venv/bin/python scripts/check_status.py      # /local and /recent paging, long-hash shortening, source-health states, /status and /api/v1/status (offline)
 .venv/bin/python scripts/check_feodo.py       # Feodo parsing, in-place re-import, local-corpus verdict (offline)
 .venv/bin/python scripts/check_docs.py        # /about, /privacy, /sitemap.xml, /robots.txt (offline)
 .venv/bin/python scripts/check_fresh.py       # fresh=1 rationing, crawler policy, robots (offline)

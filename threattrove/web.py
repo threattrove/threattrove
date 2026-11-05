@@ -18,7 +18,7 @@ import os
 import re
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from flask import (
     Flask,
@@ -42,11 +42,9 @@ from .bulk import (
     to_csv,
 )
 from .core import (
-    VERSION,
     VERDICT_LABEL,
-    VERDICT_MALICIOUS,
-    VERDICT_SUSPICIOUS,
     VERDICT_UNKNOWN,
+    VERSION,
     Engine,
     Indicator,
     Store,
@@ -167,6 +165,17 @@ def _rel_time(ts: Optional[float]) -> str:
 
 
 _QUERY_RE = re.compile(r"[?#].*$", re.S)
+_HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
+
+# A digest is compared against a report by its ends: the first characters say
+# which sample, the last ones catch a mistyped tail. The middle is the part a
+# reader can afford to lose on a phone. Seven and eight rather than eight and
+# eight: a 390px phone leaves the indicator column about 70px, which is eight
+# characters a line, so 17 characters spills an orphan character onto a third
+# line while 16 fits two -- and the ellipsis lands at the end of the first,
+# leaving the whole tail readable on the second.
+SHORT_HEAD = 7
+SHORT_TAIL = 8
 
 
 def redact(value: str) -> str:
@@ -178,6 +187,27 @@ def redact(value: str) -> str:
     ours to republish.
     """
     return _QUERY_RE.sub("", value or "")
+
+
+def short_value(value: str) -> str:
+    """Middle-truncate a hex digest for narrow screens; empty for anything else.
+
+    A 64-character SHA-256 in a 390px table column wraps to eight lines and
+    pushes every other lookup below the fold. The template renders both the
+    full value and this shortened form and a media query picks one, so the
+    desktop view keeps the whole digest and a phone shows
+    ``first7\u2026last8`` -- short enough to need two lines in the column a
+    390px screen leaves, long enough that both ends stay recognisable. Domains,
+    IPs and URLs are left alone: truncating them would hide the part that
+    identifies the indicator.
+
+    Returns an empty string when the value is not a hash, which the templates
+    use as "render the plain value, there is nothing to shorten".
+    """
+    text = (value or "").strip()
+    if len(text) >= 32 and _HEX_RE.match(text):
+        return f"{text[:SHORT_HEAD]}\u2026{text[-SHORT_TAIL:]}"
+    return ""
 
 
 def result_url(ind: Indicator) -> str:
@@ -416,6 +446,7 @@ def create_app(store: Optional[Store] = None) -> Flask:
             "years": time.strftime("%Y"),
             "defang": defang,
             "redact": redact,
+            "short_value": short_value,
             "public_base": public_base(),
             "site_base": canonical_base(),
         }

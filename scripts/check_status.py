@@ -31,7 +31,7 @@ from threattrove.core import (  # noqa: E402
     Store,
     health_state,
 )
-from threattrove.web import _source_rows, app  # noqa: E402
+from threattrove.web import _source_rows, app, short_value  # noqa: E402
 
 FAILED = []
 TOTAL = 120
@@ -58,14 +58,21 @@ def seed(store: Store) -> None:
 
 
 def seed_history(store: Store) -> None:
-    """History rows for the /recent pager: HISTORY_ROWS, newest last."""
+    """History rows for the /recent pager: HISTORY_ROWS, newest last.
+
+    Every fifth row is a 64-character digest so the feed carries both the long
+    values that need shortening on a phone and the short ones that must not be
+    touched.
+    """
     base = 1_700_000_000.0
     with store._lock:                      # noqa: SLF001 - a check may be direct
         for i in range(HISTORY_ROWS):
+            kind, value = (("hash", f"{i:064x}") if i % 5 == 0
+                           else ("domain", f"recent{i:03d}.example"))
             store.conn.execute(
                 "INSERT INTO history (kind, value, verdict, score, ts)"
                 " VALUES (?,?,?,?,?)",
-                ("domain", f"recent{i:03d}.example", "clean", 0, base + i))
+                (kind, value, "clean", 0, base + i))
         store.conn.commit()
 
 
@@ -166,6 +173,33 @@ def main() -> int:
     check(store.health_for()["canary_skip"]["state"] == HEALTH_SKIP,
           "and it stays a skip when read back")
 
+    print("display: long values")
+    digest = "d41d8cd98f00b204e9800998ecf8427e"
+    check(short_value(digest) == "d41d8cd\u2026ecf8427e",
+          "a 32-char digest keeps its first 7 and last 8 characters")
+    check(short_value("a" * 64) == "a" * 7 + "\u2026" + "a" * 8,
+          "a 64-char digest shortens the same way")
+    check(len(short_value("A" * 64)) == 16, "uppercase hex shortens too")
+    check(short_value("recent042.example") == "",
+          "a domain is left whole: its middle is the identifying part")
+    check(short_value("a" * 31) == "", "31 characters is not a digest")
+    check(short_value("z" * 64) == "", "a non-hex 64-character value is not one")
+    check(short_value("") == "", "an empty value stays empty")
+
+    # The two spans are only useful together with the rule that swaps them, so
+    # the stylesheet is part of the contract rather than decoration.
+    css_path = os.path.join(os.path.dirname(HERE), "threattrove", "static",
+                            "style.css")
+    with open(css_path, encoding="utf-8") as fh:
+        css = fh.read()
+    check(".short-val { display: none; }" in css,
+          "the shortened value is hidden on a wide screen")
+    phone = css.find("@media (max-width: 720px)")
+    check(phone != -1 and css.find(".short-val { display: inline;", phone) != -1,
+          "the phone breakpoint swaps it in")
+    check(phone != -1 and css.find(".full-val { display: none; }", phone) != -1,
+          "and hides the full value at the same width")
+
     print("web: /local")
     client = app.test_client()
     resp = client.get("/local")
@@ -175,6 +209,14 @@ def main() -> int:
     check("page 1 / 3" in body, "50 rows a page makes three pages")
     check(len(resp.data) < 60_000, "a page of 50 rows stays under 60 KB")
     check('rel="next"' in body, "page 1 links to the next page")
+    check(body.count('class="full-val"') == 50,
+          "every 64-char hash also carries its whole value")
+    check(body.count('class="short-val"') == 50,
+          "and a shortened copy for a phone")
+    check('<span class="short-val">000119a\u2026aaaaaaaa</span>' in body,
+          "the newest hash shows first7…last8 on a narrow screen")
+    check('title="000119' + "a" * 58 + '"' in body,
+          "the link still carries the full digest as its title")
 
     resp = client.get("/local?page=3")
     body = resp.get_data(as_text=True)
@@ -219,6 +261,14 @@ def main() -> int:
     check("page 1 / 3" in body, "50 rows a page makes three pages")
     check(body.count('class="mono wrap-cell"') == 50,
           "the page renders 50 rows")
+    check(body.count('class="full-val"') == 10,
+          "the ten digest rows carry their whole value")
+    check(body.count('class="short-val"') == 10,
+          "and a shortened copy each")
+    check('<span class="short-val">0000000\u20260000007d</span>' in body,
+          "a feed digest is shortened to first7…last8")
+    check('class="short-val">recent' not in body,
+          "domains in the feed are never truncated")
     check(len(resp.data) < 60_000, "a page of 50 lookups stays under 60 KB")
     check(resp.headers.get("Cache-Control") == "no-store",
           "the feed is not cached")

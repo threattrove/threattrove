@@ -242,6 +242,12 @@ td { padding: 10px; border-bottom: 1px solid var(--line-soft); vertical-align: m
 tbody tr:hover { background: rgba(56,189,248,.04); }
 td.mono, .mono { font-family: var(--mono); font-size: var(--fs-300); }
 td.wrap-cell { word-break: break-all; }
+/* A 64-character digest wraps to eight lines in a 390px column. Both the whole
+   value and a middle-truncated copy are server-rendered; the phone breakpoint
+   below shows only the short one. Keeping both in the DOM means the link, the
+   tooltip and a copy-paste still carry the full hash. */
+.full-val { display: inline; }
+.short-val { display: none; }
 /* A type name and a relative time are shorter than the column they sit in, but
    a phone-width table squeezes them until "1h ago" becomes two lines and every
    row grows a line taller. Only the indicator is allowed to wrap. */
@@ -465,8 +471,20 @@ hr.sep { border: 0; border-top: 1px solid var(--line); margin: 22px 0; }
   .brand-name { font-size: var(--fs-500); }
   h1 { font-size: var(--fs-600); }
   .hero h1 { font-size: var(--fs-700); }
-  td, th { padding: 9px 6px; }
+  /* A 360px table with a verdict pill in it measured 301px against a 293px
+     card once the indicator column stopped absorbing the slack, which left
+     every feed a hair into horizontal scroll. A pixel off the cell padding and
+     four off the pill's gives the row back its margin. */
+  td, th { padding: 9px 5px; }
+  .pill { padding: 6px 8px; }
   .ind-value { font-size: var(--fs-300); }
+  /* Seven characters, an ellipsis and the last eight: sixteen characters, two
+     lines in the ~70px the indicator column gets at 390px, instead of the
+     eight a whole SHA-256 needs. The cell keeps `word-break: break-all`, so
+     nothing overflows the table and the verdict stays visible without
+     scrolling sideways. */
+  .full-val { display: none; }
+  .short-val { display: inline; }
   /* Data tables are wider than a phone. Scroll them inside their own card
      instead of letting them stretch the whole page sideways. */
   table { display: block; width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }

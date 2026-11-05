@@ -16,10 +16,14 @@
     <tbody>
     {% for r in rows %}
       {% set shown = redact(r.value) %}
+      {% set short = short_value(shown) %}
       <tr>
         <td class="mono wrap-cell">
           {% if shown == r.value %}
-          <a href="{{ url_for('result_page', kind=r.kind, v=r.value) }}">{{ r.value }}</a>
+          {#- Both forms are rendered: style.css swaps them at the phone
+              breakpoint, so a 64-char digest needs two lines instead of eight.
+              The link and its title always carry the whole value. -#}
+          <a href="{{ url_for('result_page', kind=r.kind, v=r.value) }}"{% if short %} title="{{ r.value }}"{% endif %}>{% if short %}<span class="full-val">{{ r.value }}</span><span class="short-val">{{ short }}</span>{% else %}{{ r.value }}{% endif %}</a>
           {% else %}
           <span title="query string and fragment hidden from this public feed">{{ shown }}<span class="note">?…</span></span>
           {% endif %}

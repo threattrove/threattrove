@@ -64,9 +64,12 @@
       <thead><tr><th>Indicator</th><th>Label</th><th>Note</th></tr></thead>
       <tbody>
       {% for e in entries %}
+        {% set short = short_value(e.value) %}
         <tr>
           <td class="mono wrap-cell">
-            <a href="{{ url_for('result_page', kind=e.kind, v=e.value) }}">{{ e.value }}</a>
+            {#- Same dual span as /recent: full on desktop, middle-truncated on a
+                phone. A hash is identified by its ends, so the middle goes. -#}
+            <a href="{{ url_for('result_page', kind=e.kind, v=e.value) }}"{% if short %} title="{{ e.value }}"{% endif %}>{% if short %}<span class="full-val">{{ e.value }}</span><span class="short-val">{{ short }}</span>{% else %}{{ e.value }}{% endif %}</a>
           </td>
           <td><span class="tag {{ 'malicious' if 'mal' in e.label or 'bad' in e.label else 'clean' if 'clean' in e.label or 'good' in e.label else 'suspicious' }}">{{ e.label }}</span></td>
           <td class="note">{{ e.note }}</td>
