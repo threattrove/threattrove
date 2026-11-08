@@ -23,7 +23,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from threattrove import families  # noqa: E402
-from threattrove.core import Report, SourceResult, Store  # noqa: E402
+from threattrove.core import Indicator, Report, SourceResult, Store  # noqa: E402
 from threattrove.web import create_app  # noqa: E402
 
 FAILED = []
@@ -235,6 +235,31 @@ def main() -> int:
 
     generic = client.get(f"/i/hash?v={vt_generic}").get_data(as_text=True)
     check("generic label renders no chip", "fam-chip" not in generic)
+
+    print("\n-- headline")
+    # The chip beside the headline says "Mirai"; the headline used to quote the
+    # vendor's raw string, so one page said the same family two ways.
+    raw = ["Trojan.Linux.Mirai", "Linux/Mirai.FDF trojan", "trojan.mirai/ddos"]
+    results = [SourceResult(source="local", status="found", verdict="malicious")]
+    results += [SourceResult(source=f"vendor{i}", status="found",
+                             verdict="malicious", detections=40, total=70,
+                             detail={"signature": label})
+                for i, label in enumerate(raw)]
+    rep = Report(Indicator("hash", "0" * 64, "0" * 64), results=results)
+    check("labels stay raw for the API", rep.families() == raw, rep.families())
+    check("one family out of three dialects",
+          rep.canonical_families() == ["Mirai"], rep.canonical_families())
+    line = rep.headline()
+    check("headline names the family canonically", "(Mirai)" in line, line)
+    check("headline does not quote the vendor string",
+          "Trojan.Linux.Mirai" not in line, line)
+    unknown = Report(Indicator("hash", "2" * 64, "2" * 64),
+                     results=[SourceResult(source="vendor", status="found",
+                                           verdict="malicious",
+                                           detail={"signature": "KittyKiller9000"})])
+    check("an unknown label is quoted exactly as sent",
+          unknown.canonical_families() == ["KittyKiller9000"],
+          unknown.canonical_families())
 
     print("\n-- memoisation")
     seed(store, "1" * 32, "virustotal", "threat_label", "Linux/Mirai.FDF trojan")

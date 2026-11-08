@@ -22,7 +22,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
 
-VERSION = "2.12.0"
+VERSION = "2.12.1"
 
 DEFAULT_TIMEOUT = float(os.environ.get("TT_TIMEOUT", "20"))
 CACHE_TTL_SECONDS = int(os.environ.get("TT_CACHE_TTL", str(7 * 24 * 3600)))
@@ -839,6 +839,33 @@ class Report:
                 names.append(label)
         return names[:4]
 
+    def canonical_families(self) -> List[str]:
+        """The same labels, folded to the names the family pages use.
+
+        `families()` deliberately reports what each vendor wrote, because that
+        is what the JSON API hands back and a consumer may match on it. A
+        headline is read by a person, and a person does not need one family
+        four times in four dialects: `Trojan.Linux.Mirai`, `Linux/Mirai.FDF
+        trojan` and `trojan.mirai/ddos` are Mirai, and the headline should say
+        so once, in the same word the chip beside it uses.
+
+        A label the alias table does not know is kept exactly as the source
+        sent it. Inventing a name for an unfamiliar string is how a normaliser
+        starts lying about its evidence.
+        """
+        from .families import normalize
+
+        names: List[str] = []
+        seen = set()
+        for raw in self.families():
+            norm = normalize(raw)
+            for name in ((norm.primary,) if norm.primary else (raw,)):
+                if name.lower() in seen:
+                    continue
+                seen.add(name.lower())
+                names.append(name)
+        return names
+
     def file_identity(self) -> Dict[str, str]:
         """Best-effort "what file is this" summary from sources that name it.
 
@@ -1121,7 +1148,9 @@ class Report:
         verdict = self.verdict()
         det, tot = self.engine_ratio()
         sources = self.corroboration()
-        families = self.families()
+        # Canonical names, not the vendor's raw string: the chip beside this
+        # headline already says "Mirai", and the two must not disagree.
+        families = self.canonical_families()
         ident = self.file_identity()
         name = ident.get("name", "")
 

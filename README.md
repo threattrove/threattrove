@@ -338,6 +338,11 @@ cached answers at read time — no table, no migration — and memoised on
 built from and no stale family outlives it. The JSON API still returns each
 vendor's own labels: normalisation is a view of the evidence, not a rewrite of it.
 
+The headline is the exception: it is read as a sentence, not parsed as data, so
+it names the family the way the chip does (`... 12/70 engines flagged this as
+malicious (Mirai)`). A label the table does not know still appears exactly as
+the vendor sent it.
+
 ---
 
 ## Sources
