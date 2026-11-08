@@ -42,6 +42,7 @@
     <nav class="nav">
       <a href="{{ url_for('bulk_page') }}" {% if request.endpoint == 'bulk_page' %}class="active"{% endif %}>Bulk</a>
       <a href="{{ url_for('recent_page') }}" {% if request.endpoint == 'recent_page' %}class="active"{% endif %}>Recent</a>
+      <a href="{{ url_for('families_page') }}" {% if request.endpoint in ('families_page', 'family_page') %}class="active"{% endif %}>Families</a>
       <a href="{{ url_for('sources_page') }}" {% if request.endpoint == 'sources_page' %}class="active"{% endif %}>Sources</a>
       <a href="{{ url_for('status_page') }}" {% if request.endpoint == 'status_page' %}class="active"{% endif %}>Status</a>
       <a href="{{ url_for('api_docs') }}" {% if request.endpoint == 'api_docs' %}class="active"{% endif %}>API</a>

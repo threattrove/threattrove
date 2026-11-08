@@ -12,12 +12,14 @@ or domain, get a verdict, a per-source breakdown and a bulk queue.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import io
 import json
 import os
 import re
 import threading
 import time
+from collections import Counter
 from typing import Any, Dict, List, Optional
 
 from flask import (
@@ -32,7 +34,7 @@ from flask import (
     url_for,
 )
 
-from . import cards
+from . import cards, families
 from .bulk import (
     MAX_ROWS,
     BulkJobs,
@@ -48,6 +50,8 @@ from .core import (
     VERSION,
     Engine,
     Indicator,
+    Report,
+    SourceResult,
     Store,
     defang,
     health_state,
@@ -85,6 +89,10 @@ LOCAL_PER_PAGE = 50
 #: 83 KB document that reads as a wall of rows and keeps growing; 50 rows is a
 #: screenful, and the pager makes the rest reachable without a 1,000-row page.
 RECENT_PER_PAGE = 50
+
+#: A family can name a few hundred samples; the page stays readable by showing
+#: one screenful at a time instead of a 400-row document.
+FAMILY_PER_PAGE = 50
 
 
 def _int_arg(name: str, default: int) -> int:
@@ -294,6 +302,96 @@ def _source_rows(runtime: Runtime) -> List[Dict[str, Any]]:
             "quota": _quota_row(runtime, s),
         })
     return rows
+
+
+# --------------------------------------------------------------------------
+# Family browse pages
+# --------------------------------------------------------------------------
+
+#: Memo of the cache-derived family view, keyed by database path plus the
+#: cache's (row count, newest fetch) signature. A refetch moves the signature,
+#: so a derived index can never outlive the answers it was built from.
+_FAMILY_MEMO: Dict[tuple, Dict[str, Any]] = {}
+_FAMILY_LOCK = threading.Lock()
+
+#: A cached payload is ``SourceResult.asdict()`` plus fields the web layer
+#: added; only dataclass fields may be handed back to the class.
+_SR_FIELDS = tuple(f.name for f in dataclasses.fields(SourceResult))
+
+
+def _family_view(store: Store) -> Dict[str, Any]:
+    """Fold the cached hash answers into a family index, memoised.
+
+    Nothing here is stored separately: the cache payload is the only copy of a
+    source's answer, so rebuilding from it means a refetched sample cannot keep
+    a stale family in the browse pages. ``cache_rows`` reads every sample, not
+    just unexpired ones, because a browse page shows what was cached, with the
+    cache time on every row.
+    """
+    key = (str(getattr(store, "path", "")), store.cache_signature("hash"))
+    with _FAMILY_LOCK:
+        hit = _FAMILY_MEMO.get(key)
+    if hit is not None:
+        return hit
+
+    rows = store.cache_rows("hash")
+    index = families.build_index(rows)
+    # The fold above keeps one source set per sample. The page also needs to say
+    # which source used which spelling, so read that pairing once and keep it
+    # beside the index rather than re-reading the cache per request.
+    senders = families.label_sources(rows)
+    values: Dict[str, Dict[str, Any]] = {}
+    for value, source, payload, fetched_at, _lv in rows:
+        rec = values.setdefault(value, {"rows": [], "at": 0.0})
+        rec["rows"].append((source, payload))
+        if fetched_at > rec["at"]:
+            rec["at"] = float(fetched_at)
+    tags: Dict[str, set] = {}
+    for fam, samples in index.items():
+        for value in samples:
+            tags.setdefault(value, set()).add(fam)
+    view = {"index": index, "values": values, "tags": tags,
+            "label_sources": senders}
+
+    with _FAMILY_LOCK:
+        if len(_FAMILY_MEMO) >= 4:      # a refetch must not leak one dict each
+            _FAMILY_MEMO.clear()
+        _FAMILY_MEMO[key] = view
+    return view
+
+
+def _sample_verdict(value: str, rows: List[tuple]) -> str:
+    """The aggregate verdict for one sample, from its cached rows only."""
+    ind = parse_indicator(value)
+    if ind is None:
+        return VERDICT_UNKNOWN
+    results: List[SourceResult] = []
+    for source, payload in rows:
+        if not isinstance(payload, dict):
+            continue
+        kwargs = {k: payload.get(k) for k in _SR_FIELDS if k in payload}
+        kwargs.setdefault("source", source)
+        try:
+            results.append(SourceResult(**kwargs))
+        except TypeError:       # a payload from a future schema: skip the row
+            continue
+    return Report(indicator=ind, results=results).verdict()
+
+
+def _resolve_family(index: Dict[str, Any], name: str) -> Optional[str]:
+    """The canonical family a URL segment names, or ``None``.
+
+    Exact match first, then case-folded: ``/family/mirai`` and
+    ``/family/Mirai`` are the same page, but two families that differ only by
+    case would stay distinct (the alias table has none).
+    """
+    if name in index:
+        return name
+    folded = name.casefold()
+    for fam in index:
+        if fam.casefold() == folded:
+            return fam
+    return None
 
 
 #: How long a canary result stays meaningful. The timer runs every four hours,
@@ -520,9 +618,14 @@ def create_app(store: Optional[Store] = None) -> Flask:
         report = rt.engine.lookup(ind, use_cache=not fresh)
         data = _json_report(report)
 
+        # Chips are presentation, so they are attached to copies: ``raw_json``
+        # stays the provider payload, unedited.
+        rep = [{**r, "families": families.chips_of(r)}
+               for r in data["results"] if r["category"] == "reputation"]
+
         resp = make_response(render_template(
             "result.html", report=data, indicator=ind,
-            rep=[r for r in data["results"] if r["category"] == "reputation"],
+            rep=rep,
             intel=[r for r in data["results"] if r["category"] == "intel"],
             raw_json=json.dumps(data, indent=2),
         ))
@@ -589,6 +692,119 @@ def create_app(store: Optional[Store] = None) -> Flask:
         resp.headers["Cache-Control"] = "no-store"
         if page > 1:
             resp.headers["X-Robots-Tag"] = "noindex, follow"
+        return resp
+
+    @app.get("/family")
+    def families_page() -> Any:
+        """Every family the cached answers have named, biggest first.
+
+        This is a view of evidence, not a taxonomy: a family is here because a
+        vendor label on a cached sample resolved to it, and the count is how
+        many samples that was. Nothing is seeded from a list of malware names,
+        so an empty cache honestly renders an empty page.
+        """
+        guard = page_guard()
+        if guard:
+            return guard
+        rt: Runtime = app.extensions["threattrove"]
+        view = _family_view(rt.store)
+        cards = []
+        for fam, samples in view["index"].items():
+            srcs: set = set()
+            for info in samples.values():
+                srcs |= info["sources"]
+            newest = max(view["values"][v]["at"] for v in samples)
+            recent = sorted(samples, key=lambda v: -view["values"][v]["at"])
+            cards.append({
+                "name": fam,
+                "samples": len(samples),
+                "sources": sorted(srcs),
+                "newest": newest,
+                "examples": [v[:14] + "\u2026" for v in recent[:3]],
+            })
+        cards.sort(key=lambda c: (-c["samples"], c["name"]))
+        resp = make_response(render_template(
+            "families.html", cards=cards,
+            attributed=len(view["tags"]), cached=len(view["values"]),
+            sources=sorted({s for c in cards for s in c["sources"]}),
+        ))
+        resp.headers["Cache-Control"] = "public, max-age=120"
+        return resp
+
+    @app.get("/family/<path:name>")
+    def family_page(name: str) -> Any:
+        """One family: its samples, and the vendor labels that put them here.
+
+        The page answers "why is this sample in this bucket?" on the same row:
+        the source that named it and the raw label it used. Where a sample
+        carries a second family, that family is a link, so browsing follows the
+        evidence instead of a curated sibling list.
+        """
+        guard = page_guard()
+        if guard:
+            return guard
+        rt: Runtime = app.extensions["threattrove"]
+        view = _family_view(rt.store)
+        fam = _resolve_family(view["index"], name)
+        if fam is None:
+            return render_template(
+                "error.html", code=404,
+                message="No cached sample is attributed to that family.",
+            ), 404
+
+        samples = view["index"][fam]
+        rows = []
+        for value, info in samples.items():
+            rows.append({
+                "value": value,
+                "verdict": _sample_verdict(value, view["values"][value]["rows"]),
+                "sources": sorted(info["sources"]),
+                "also": sorted(view["tags"].get(value, set()) - {fam}),
+                "at": view["values"][value]["at"],
+            })
+        rows.sort(key=lambda r: (-r["at"], r["value"]))
+        total = len(rows)
+        multi = sum(1 for r in rows if r["also"])
+        pages = max(1, (total + FAMILY_PER_PAGE - 1) // FAMILY_PER_PAGE)
+        page = min(max(1, _int_arg("page", 1)), pages)
+        shown = rows[(page - 1) * FAMILY_PER_PAGE: page * FAMILY_PER_PAGE]
+
+        counts = Counter()
+        for info in samples.values():
+            for raw in info["labels"]:
+                counts[raw] += 1
+        # Two lists, not one: the handful of names a source actually chose, then
+        # the long tail of labels that carry an engine suffix or a second
+        # family. The second set is real evidence, but it is not what someone
+        # reading this page needs first, so the template folds it away.
+        senders = view["label_sources"].get(fam, {})
+        plain, variants = families.label_split(counts)
+
+        def _label(raw: str) -> Dict[str, Any]:
+            return {"raw": raw, "n": counts[raw],
+                    "sources": sorted(senders.get(raw, ()))}
+
+        spellings = [_label(r) for r in sorted(plain, key=lambda r: (-counts[r], r))]
+        variant_labels = [_label(r)
+                          for r in sorted(variants, key=lambda r: (-counts[r], r))]
+        co = Counter()
+        for value in samples:
+            for other in view["tags"].get(value, ()):
+                if other != fam:
+                    co[other] += 1
+
+        resp = make_response(render_template(
+            "family.html", fam=fam, rows=shown, total=total, page=page,
+            pages=pages, per_page=FAMILY_PER_PAGE,
+            spellings=spellings, variants=variant_labels,
+            labels=len(counts), co=co.most_common(12),
+            multi=multi,
+            sources=sorted({s for r in rows for s in r["sources"]}),
+            newest=rows[0]["at"] if rows else 0.0,
+            first=(page - 1) * FAMILY_PER_PAGE + 1 if shown else 0,
+            last=(page - 1) * FAMILY_PER_PAGE + len(shown),
+        ))
+        resp.headers["Cache-Control"] = "public, max-age=120"
         return resp
 
     @app.get("/sources")

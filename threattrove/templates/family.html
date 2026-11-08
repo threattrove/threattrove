@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+
+{% block title %}{{ fam }} &mdash; malware family &middot; {{ site_name }}{% endblock %}
+{% block og_title %}{{ fam }} &mdash; malware family{% endblock %}
+{% block og_description %}{{ total }} cached samples attributed to {{ fam }} by {{ sources|length }} source{{ "" if sources|length == 1 else "s" }}.{% endblock %}
+
+{% block content %}
+<nav class="crumb" aria-label="Breadcrumb">
+  <a href="{{ url_for('families_page') }}">Families</a>
+  <span class="crumb-sep">/</span>
+  <span aria-current="page">{{ fam }}</span>
+</nav>
+
+<h1>{{ fam }}</h1>
+<p class="lead">{{ total }} cached sample{{ "" if total == 1 else "s" }} attributed
+  to {{ fam }} by {{ sources|length }} source{{ "" if sources|length == 1 else "s" }},
+  through {{ labels }} distinct vendor label{{ "" if labels == 1 else "s" }}.</p>
+
+<div class="stats" style="margin-bottom:22px">
+  <div class="stat"><b>{{ total }}</b><span>cached samples</span></div>
+  <div class="stat"><b>{{ sources|length }}</b><span>sources naming it</span></div>
+  <div class="stat"><b>{{ labels }}</b><span>distinct labels</span></div>
+  <div class="stat"><b>{{ multi }}</b><span>also in another family</span></div>
+</div>
+
+<div class="card">
+  <h2>Samples</h2>
+  <p class="hint">Newest cache entry first. Every row links to the full report,
+    where each source's own answer is shown unsummarised. The labels behind these
+    rows are listed <a href="#labels">below the table</a>.</p>
+  <table>
+    <thead><tr><th>Sample</th><th>Verdict</th><th>Named by</th><th class="nowrap">Also tagged</th><th class="nowrap">Cached</th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        <td class="mono wrap-cell"><a href="{{ url_for('result_page', kind='hash', v=r.value) }}" title="{{ r.value }}">{{ r.value }}</a></td>
+        <td><span class="tag {{ r.verdict }}">{{ verdict_label.get(r.verdict, r.verdict) }}</span></td>
+        <td>{% for s in r.sources %}<span class="src-pill">{{ s }}</span>{% endfor %}</td>
+        <td>{% for other in r.also %}<a class="fam-chip alt" href="{{ url_for('family_page', name=other) }}">{{ other }}</a>{% else %}<span class="note">–</span>{% endfor %}</td>
+        <td class="note nowrap" title="{{ fmt_ts(r.at) }}">{{ rel_time(r.at) }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <div class="pager">
+    <span class="pager-info">{{ first }}–{{ last }} of {{ total }}</span>
+    {% if page > 1 %}
+    <a class="btn ghost small" rel="prev" href="{{ url_for('family_page', name=fam, page=page-1) }}">&larr; Newer</a>
+    {% endif %}
+    {% if page < pages %}
+    <a class="btn ghost small" rel="next" href="{{ url_for('family_page', name=fam, page=page+1) }}">Older &rarr;</a>
+    {% endif %}
+    <span class="pager-page">page {{ page }} / {{ pages }}</span>
+  </div>
+</div>
+
+<div class="card" id="labels">
+  <h2>Why these samples are here</h2>
+  <p class="hint">Each source returns its own string for a family. This is every
+    label behind the {{ total }} sample{{ "" if total == 1 else "s" }} above, the
+    source that returned it, and how many samples carried it. Counts overlap: one
+    sample can be named twice, so they do not add up to the sample total.</p>
+  <table class="spell-table">
+    <thead><tr><th>Label as returned</th><th>Source that returned it</th><th class="num nowrap">Samples carrying it</th></tr></thead>
+    <tbody>
+    {% for s in spellings %}
+      <tr>
+        <td><code class="fam-spell">{{ s.raw }}</code></td>
+        <td>{% for src in s.sources %}<span class="src-pill">{{ src }}</span>{% endfor %}</td>
+        <td class="num nowrap"><b class="mono">{{ s.n }}</b> <span class="note">sample{{ "" if s.n == 1 else "s" }}</span></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if variants %}
+  <details class="spell-more">
+    <summary>{{ variants|length }} more label{{ "" if variants|length == 1 else "s" }}
+      carr{{ "ies" if variants|length == 1 else "y" }} an engine suffix or a second family name</summary>
+    <p class="hint">The same evidence in less readable strings: an engine's own
+      suffix, a variant token, or a label that names two families. They are still
+      this family's evidence and they are counted in the {{ labels }} labels
+      above; a token the alias table does not know is never guessed at, so it
+      stays exactly as the source sent it.</p>
+    <table class="spell-table">
+      <thead><tr><th>Label as returned</th><th>Source that returned it</th><th class="num nowrap">Samples carrying it</th></tr></thead>
+      <tbody>
+      {% for s in variants %}
+        <tr>
+          <td><code class="fam-spell">{{ s.raw }}</code></td>
+          <td>{% for src in s.sources %}<span class="src-pill">{{ src }}</span>{% endfor %}</td>
+          <td class="num nowrap"><b class="mono">{{ s.n }}</b> <span class="note">sample{{ "" if s.n == 1 else "s" }}</span></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </details>
+  {% endif %}
+</div>
+
+{% if co %}
+<div class="card">
+  <h2>Named alongside</h2>
+  <p class="hint">Counted per sample: a sample tagged with both families adds one
+    here. This is co-occurrence in vendor labels, not a claim that the two
+    families are related.</p>
+  <div class="fam-chips">
+    {% for other, n in co %}
+    <a class="fam-chip alt" href="{{ url_for('family_page', name=other) }}">{{ other }}<span class="fam-chip-n">{{ n }}</span></a>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+<p class="note" style="margin-top:18px">Derived from cached source answers, newest
+  cache entry {{ fmt_ts(newest) }}. A sample leaves this page when the cache entry
+  it was read from is replaced; a generic or unrecognised label never put it
+  here.</p>
+{% endblock %}

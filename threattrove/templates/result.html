@@ -1,6 +1,11 @@
 {% extends "base.html" %}
 
 {% set v = report.verdict %}
+{#- The chips are the canonical reading of every vendor label on the page.
+    The Details row used to print the raw strings, which repeated a family once
+    per source and called an unmapped label a family. -#}
+{% set fams = namespace(names=[]) %}
+{% for r in rep %}{% for c in r.families %}{% if c.name not in fams.names %}{% set _ = fams.names.append(c.name) %}{% endif %}{% endfor %}{% endfor %}
 {% block title %}{{ indicator.value if indicator.value|length < 70 else indicator.value[:67] ~ '…' }} — {{ verdict_label.get(v, v) }} · {{ site_name }}{% endblock %}
 
 {% block og_type %}article{% endblock %}
@@ -131,7 +136,7 @@
             <td><span class="src-dot {{ r.verdict }}"></span><span class="src-name">{{ r.source }}</span></td>
             <td><span class="tag {{ r.verdict }}">{{ verdict_label.get(r.verdict, r.verdict) }}</span></td>
             <td class="ratio">{% if r.total and r.detail and r.detail.get('engines') %}{{ r.detections }}/{{ r.total }}{% else %}–{% endif %}</td>
-            <td class="note">{{ r.note }}</td>
+            <td class="note">{% if r.families %}<span class="fam-chips">{% for c in r.families %}<a class="fam-chip{% if not c.primary %} alt{% endif %}" href="{{ url_for('family_page', name=c.name) }}" title="{{ c.name }} — named by this source as {{ c.raw }}">{{ c.name }}</a>{% endfor %}</span>{% endif %}{{ r.note }}</td>
           </tr>
         {% endfor %}
         </tbody>
@@ -176,7 +181,7 @@
           {% if indicator.path %}<tr><td class="note">Path</td><td class="mono wrap-cell">{{ indicator.path }}</td></tr>{% endif %}
           <tr><td class="note">Weighted score</td><td class="mono">{{ report.score }} / 100</td></tr>
           <tr><td class="note">Corroboration</td><td class="mono">{{ report.corroboration }}</td></tr>
-          {% if report.families %}<tr><td class="note">Family</td><td class="note">{{ report.families|join(', ') }}</td></tr>{% endif %}
+          {% if fams.names %}<tr><td class="note">Famil{{ 'y' if fams.names|length == 1 else 'ies' }}</td><td class="note">{{ fams.names|join(', ') }}</td></tr>{% endif %}
           <tr><td class="note">Flagged by</td><td class="note">{{ report.results|selectattr('verdict', 'in', ['malicious','suspicious'])|map(attribute='source')|join(', ') or '–' }}</td></tr>
           <tr><td class="note">Looked up</td><td class="note">{{ fmt_ts(report.created) }}</td></tr>
         </tbody>

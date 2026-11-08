@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+
+{% block title %}Malware families &mdash; {{ site_name }}{% endblock %}
+{% block og_description %}{{ cards|length }} malware families named by vendor labels on {{ attributed }} cached samples.{% endblock %}
+
+{% block content %}
+<h1>Malware families</h1>
+<p class="lead">{{ cards|length }} famil{{ "y" if cards|length == 1 else "ies" }}
+  named across {{ attributed }} of {{ cached }} cached hash samples, by
+  {{ sources|length }} source{{ "" if sources|length == 1 else "s" }}. A family
+  appears here only when a vendor label on a cached answer resolved to it;
+  generic labels (<span class="mono">Trojan.Generic</span>, confidence strings)
+  and vendor tokens the alias table does not know are left out rather than
+  guessed at.</p>
+
+{% if cards %}
+<div class="fam-grid">
+  {% for c in cards %}
+  <a class="fam-card" href="{{ url_for('family_page', name=c.name) }}">
+    <span class="fam-card-name">{{ c.name }}</span>
+    <span class="fam-card-n">{{ c.samples }} sample{{ "" if c.samples == 1 else "s" }}</span>
+    <span class="fam-card-src">named by {{ c.sources|join(", ") }}</span>
+    <span class="fam-card-ex mono">{{ c.examples|join(" · ") }}</span>
+    <span class="fam-card-when">newest cache entry {{ rel_time(c.newest) }}</span>
+  </a>
+  {% endfor %}
+</div>
+{% else %}
+<div class="card"><div class="empty">No cached answer carries a family label yet.</div></div>
+{% endif %}
+
+<p class="note" style="margin-top:18px">A sample can carry more than one family
+  (for example <span class="mono">trojan.mirai/gafgyt</span>); it is counted once
+  under each. Co-occurrence is counted per sample, never inferred from a family
+  name.</p>
+{% endblock %}

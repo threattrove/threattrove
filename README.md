@@ -139,6 +139,8 @@ lands around 140 MB of SQLite — plan disk accordingly.
 | `/recent` | The lookup feed, newest first, 50 rows a page |
 | `/sources` | Source catalogue with live state (`active` / `needs key` / `opt-in`) |
 | `/local` | The local corpus: 50 rows a page, filter by kind, search a value, add or delete |
+| `/family` | The families the cached vendor labels name, biggest first |
+| `/family/<name>` | One family: its samples, the vendor labels behind them, and what is named alongside |
 | `/status` | Per-source health: last canary answer, latency, drift, and what is not answering |
 | `/about` | What the verdict rules are, what the tool does not claim, and who it is for |
 | `/privacy` | What is stored, what is sent upstream, what is never collected |
@@ -314,6 +316,27 @@ When a source names the file — NSRL/CIRCL `FileName`/`ProductName`/
 verdict (`file_identity` in the JSON). A known Windows binary therefore renders
 as `Known good: cmd.exe (Microsoft Windows Operating System)` rather than as an
 anonymous hash.
+
+### Which family is this?
+
+Vendors spell the same family differently: `Trojan.Linux.Mirai`,
+`trojan.mirai/gafgyt`, `Linux/Mirai.FDF trojan`. `threattrove/families.py` folds
+those strings onto a canonical family through a **closed alias table** — a token
+the table does not know is reported as unmapped, never guessed at. The key is a
+*set*, so `trojan.draftor/salat` and `trojan.salat/draftor` are the same two
+families in either order, and a label naming two families keeps both. Category
+words and hedges (`Trojan.Generic`, `malware`, `malicious_confidence_100%`) are
+not families: they draw no chip and never get a browse page.
+
+Each source row on a result page carries one chip per family, with the raw vendor
+string in its `title`, and each chip links to `/family/<name>`: the samples
+attributed to that family, the source and exact label behind each one, and the
+families that share a sample with it. Nothing is seeded from a list of malware
+names, so an empty cache renders an empty page. The index is derived from the
+cached answers at read time — no table, no migration — and memoised on
+`(row count, newest fetched_at)`, so a refetch replaces the evidence a page was
+built from and no stale family outlives it. The JSON API still returns each
+vendor's own labels: normalisation is a view of the evidence, not a rewrite of it.
 
 ---
 
@@ -706,6 +729,7 @@ threattrove/
   cli.py        `threattrove` entry point
   web.py        Flask app factory + `threattrove-web`
   feeds.py      blocklist parsing (Feodo Tracker C2 CSV → local rows)
+  families.py   vendor label → canonical malware family (closed alias table)
   templates/    Jinja2 views
   static/       app.js, style.css, favicon.svg
 scripts/smoke.py        offline parser/verdict checks + live lookups
@@ -735,6 +759,7 @@ Dockerfile, docker-compose.yml
 .venv/bin/python scripts/check_docs.py        # /about, /privacy, /sitemap.xml, /robots.txt (offline)
 .venv/bin/python scripts/check_fresh.py       # fresh=1 rationing, crawler policy, robots (offline)
 .venv/bin/python scripts/check_monitor.py     # strict=1 pager contract: bad and stale fail, drift and a provider outage do not (offline)
+.venv/bin/python scripts/check_families.py    # vendor labels → families, browse pages, result-page chips (offline)
 ```
 
 ## Limitations

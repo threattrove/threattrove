@@ -22,7 +22,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
 
-VERSION = "2.11.0"
+VERSION = "2.12.0"
 
 DEFAULT_TIMEOUT = float(os.environ.get("TT_TIMEOUT", "20"))
 CACHE_TTL_SECONDS = int(os.environ.get("TT_CACHE_TTL", str(7 * 24 * 3600)))
@@ -1477,6 +1477,42 @@ class Store:
                  int(logic_version)),
             )
             self.conn.commit()
+
+    def cache_rows(self, kind: str = "hash"
+                   ) -> List[Tuple[str, str, Dict[str, Any], float, int]]:
+        """Every cached row for *kind*, decoded: (value, source, payload, at, lv).
+
+        The family browse page folds these into an index. It reads the cache
+        rather than a table of its own on purpose: the payload is the only
+        copy of a source's answer, so a refetch replaces the very input the
+        index is derived from and no stale family can outlive it.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT value, source, payload, fetched_at, logic_version"
+                " FROM cache WHERE kind=?", (kind,)).fetchall()
+        out: List[Tuple[str, str, Dict[str, Any], float, int]] = []
+        for value, source, payload, fetched_at, logic_version in rows:
+            try:
+                doc = json.loads(payload)
+            except (TypeError, ValueError):
+                continue          # an unparseable payload caches nothing
+            if isinstance(doc, dict):
+                out.append((value, source, doc, float(fetched_at),
+                            int(logic_version)))
+        return out
+
+    def cache_signature(self, kind: str = "hash") -> Tuple[int, float]:
+        """(row count, newest fetch) — enough to notice any change to the cache.
+
+        A refetch always moves ``fetched_at`` forward, so a value derived from
+        the cache can be memoised against this and stays correct for free.
+        """
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT COUNT(*), COALESCE(MAX(fetched_at), 0) FROM cache"
+                " WHERE kind=?", (kind,)).fetchone()
+        return int(row[0]), float(row[1])
 
     def clear_cache(self, older_than: Optional[float] = None) -> int:
         with self._lock:

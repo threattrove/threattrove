@@ -188,6 +188,96 @@ pre code, pre.json code { background: none; border: 0; padding: 0; font-size: in
 .chip:hover { color: var(--text); border-color: var(--accent); }
 .chips-label { font-size: var(--fs-200); color: var(--text-mute); align-self: center; }
 
+/* ---------- malware family chips (Phase A) ----------
+   A family name that the source actually gave us, normalised, sitting inside
+   the row that reported it. A row whose label the alias table cannot map draws
+   nothing at all.
+
+   These are the same rectangles as the source badges under "What decided
+   this" (.pill.mini): 5px corners, an 11px/1 mono box, 5px/8px padding, a
+   hairline outline. They are deliberately NOT the 999px verdict pill -- that
+   shape belongs to the one answer the page exists to give, and a family name
+   is an attributable claim about a sample, not a verdict. The accent tint is
+   what separates them from the neutral source badges, matching .tag.intel. */
+.fam-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 6px; }
+.fam-chip {
+  font: 600 var(--fs-100)/1 var(--mono); letter-spacing: .06em;
+  color: var(--accent);
+  border: 1px solid rgba(56,189,248,.38); background: rgba(56,189,248,.09);
+  padding: 5px 8px; border-radius: 5px; white-space: nowrap;
+}
+.fam-chip.alt {
+  font-weight: 400; letter-spacing: .04em; color: var(--text-dim);
+  border-color: var(--line); background: var(--panel);
+}
+/* A chip is a link to the family's samples, so it has to read as clickable
+   without putting an underline inside a dense table row. */
+a.fam-chip { text-decoration: none; }
+a.fam-chip:hover, a.fam-chip:focus-visible {
+  color: #e8f6ff; border-color: rgba(56,189,248,.75);
+  background: rgba(56,189,248,.16);
+}
+a.fam-chip.alt:hover, a.fam-chip.alt:focus-visible {
+  color: var(--text); border-color: rgba(56,189,248,.55);
+  background: var(--panel-2);
+}
+.fam-chip-n { margin-left: 5px; font-weight: 400; font-size: var(--fs-100); color: var(--text-mute); }
+a.fam-chip:hover .fam-chip-n { color: var(--text); }
+
+/* ---- family browse pages ---- */
+
+.crumb {
+  display: flex; align-items: center; gap: 8px; margin: 0 0 10px;
+  font: var(--fs-200)/1.4 var(--mono); color: var(--text-mute);
+}
+.crumb a { color: var(--accent); text-decoration: none; }
+.crumb a:hover { text-decoration: underline; }
+.crumb-sep { color: var(--line); }
+
+.fam-grid {
+  display: grid; gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+}
+a.fam-card {
+  display: flex; flex-direction: column; gap: 3px; padding: 14px 16px;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius); box-shadow: var(--shadow-1);
+  color: var(--text); text-decoration: none;
+}
+a.fam-card:hover, a.fam-card:focus-visible {
+  border-color: rgba(56,189,248,.5); background: var(--panel-2);
+}
+.fam-card-name { font-weight: 600; font-size: var(--fs-500); color: var(--accent); }
+.fam-card-n { font: 600 var(--fs-200)/1.3 var(--mono); color: var(--text-dim); }
+.fam-card-src { font-size: var(--fs-200); color: var(--text-mute); }
+.fam-card-ex { font-size: var(--fs-100); color: var(--text-mute); letter-spacing: .02em; }
+.fam-card-when { font-size: var(--fs-100); color: var(--text-mute); margin-top: 2px; }
+
+.src-pill {
+  display: inline-block; margin: 0 5px 3px 0; padding: 4px 6px;
+  font: 600 var(--fs-100)/1 var(--mono); letter-spacing: .05em;
+  text-transform: uppercase; color: var(--text-dim);
+  border: 1px solid var(--line-soft); background: var(--bg-soft);
+  border-radius: 4px;
+}
+
+.fam-spell { font: var(--fs-200)/1.3 var(--mono); color: var(--text); }
+.fam-spell-n { font: var(--fs-100)/1 var(--mono); color: var(--text-mute); white-space: nowrap; }
+
+/* The label evidence table: the string is the left column because that is the
+   thing being shown, and the count is right-aligned so a column of numbers can
+   be read down without re-reading each row. */
+.spell-table td, .spell-table th { padding: 8px 10px; }
+.spell-table code { word-break: break-word; }
+.spell-table .src-pill { margin: 0 4px 4px 0; }
+.spell-table .num { text-align: right; }
+/* The topbar is sticky (63px). An in-page jump to a card has to land below it,
+   or the heading it was aiming at is the one thing the reader cannot see. */
+.card[id] { scroll-margin-top: 79px; }
+details.spell-more { margin-top: 16px; background: var(--bg-soft); }
+details.spell-more > summary { font-size: var(--fs-300); font-weight: 600; }
+details.spell-more > *:not(summary) { margin: 12px 14px; }
+
 /* ---------- verdict ---------- */
 
 .verdict-bar {
@@ -492,4 +582,13 @@ hr.sep { border: 0; border-top: 1px solid var(--line); margin: 22px 0; }
      instead of letting them stretch the whole page sideways. */
   table { display: block; width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
   .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  /* Three columns of label text do not fit a phone, and the generic table rule
+     above would answer with a sideways scrollbar through the middle of a label.
+     Stack each row instead: string, then who sent it, then the count. */
+  .spell-table, .spell-table tbody, .spell-table tr, .spell-table td { display: block; width: auto; }
+  .spell-table thead { display: none; }
+  .spell-table tr { padding: 9px 0; border-bottom: 1px solid var(--line-soft); }
+  .spell-table td { border: 0; padding: 0; }
+  .spell-table td:nth-child(2) { margin-top: 5px; }
+  .spell-table td:nth-child(3) { margin-top: 4px; text-align: left; }
 }
